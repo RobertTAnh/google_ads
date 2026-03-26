@@ -33,6 +33,41 @@ def _normalize_cell_text(s: Any) -> str:
     return str(s or "").strip()
 
 
+def _try_parse_service_account_json(content: str) -> Dict[str, Any]:
+    """
+    Parse service account JSON with repair for common malformed private_key strings
+    where raw newlines are pasted into JSON.
+    """
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    marker = '"private_key": "'
+    start = content.find(marker)
+    if start == -1:
+        raise RuntimeError("Service account JSON parse failed (missing private_key marker).")
+    key_start = start + len(marker)
+    end_marker = '\n",\n  "client_email"'
+    key_end = content.find(end_marker, key_start)
+    if key_end == -1:
+        # Fallback if spacing differs
+        end_marker = '",\n  "client_email"'
+        key_end = content.find(end_marker, key_start)
+        if key_end == -1:
+            raise RuntimeError("Service account JSON parse failed (cannot locate private_key end).")
+
+    key_raw = content[key_start:key_end]
+    key_fixed = key_raw.replace("\\", "\\\\").replace("\r\n", "\n").replace("\n", "\\n")
+    repaired = content[:key_start] + key_fixed + content[key_end:]
+    parsed = json.loads(repaired)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Service account JSON parsed but invalid object.")
+    return parsed
+
+
 def _find_section_row(values: List[List[Any]], section_name: str, *, col_idx: int = 1) -> Optional[int]:
     target = section_name.strip().lower()
     for r, row in enumerate(values):
@@ -156,7 +191,7 @@ def build_sheets_service() -> Any:
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     if content:
         try:
-            info = json.loads(content)
+            info = _try_parse_service_account_json(content)
         except Exception as ex:
             raise RuntimeError(
                 "Service account JSON is invalid. "
