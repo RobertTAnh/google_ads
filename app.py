@@ -9,7 +9,8 @@ from typing import List, Optional
 
 from dataclasses import asdict
 
-from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash
 
 from google_ads_helper import (
     GoogleAdsHelperError,
@@ -107,6 +108,13 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
     app.jinja_env.filters["vnd"] = format_vnd_thousands
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     project_root = Path(__file__).resolve().parent
     google_ads_yaml = _maybe_bootstrap_google_ads_yaml(project_root)
@@ -121,6 +129,22 @@ def create_app() -> Flask:
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
     dashboard_customer_ids = _env_list("CLIENT_CUSTOMER_IDS", "")
+    admin_username = (os.getenv("ADMIN_USERNAME") or "admin").strip()
+    admin_password_hash = (os.getenv("ADMIN_PASSWORD_HASH") or "").strip()
+    admin_password_plain = os.getenv("ADMIN_PASSWORD")
+
+    @app.context_processor
+    def inject_auth_context():
+        return {"is_logged_in": bool(session.get("is_authenticated")), "auth_user": session.get("auth_user", "")}
+
+    @app.before_request
+    def require_login():
+        public_endpoints = {"login", "healthz", "static"}
+        if request.endpoint in public_endpoints:
+            return None
+        if session.get("is_authenticated"):
+            return None
+        return redirect(url_for("login", next=request.url))
 
     @app.context_processor
     def inject_mcc_context():
@@ -130,6 +154,13 @@ def create_app() -> Flask:
         """
         import time
 
+        if not session.get("is_authenticated"):
+            return {
+                "mcc_name": "",
+                "mcc_id": "",
+                "child_accounts": [],
+                "mcc_context_error": "",
+            }
         try:
             client = load_google_ads_client(
                 google_ads_yaml, default_login_customer_id=mcc_login_customer_id
@@ -179,6 +210,42 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         return redirect(url_for("dashboard"))
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if session.get("is_authenticated"):
+            return redirect(url_for("dashboard"))
+
+        next_url = request.args.get("next") or url_for("dashboard")
+        if request.method == "POST":
+            username = (request.form.get("username") or "").strip()
+            password = request.form.get("password") or ""
+
+            username_ok = username == admin_username
+            password_ok = False
+            if admin_password_hash:
+                try:
+                    password_ok = check_password_hash(admin_password_hash, password)
+                except ValueError:
+                    password_ok = False
+            elif admin_password_plain is not None:
+                password_ok = password == admin_password_plain
+
+            if username_ok and password_ok:
+                session.clear()
+                session["is_authenticated"] = True
+                session["auth_user"] = username
+                flash("Đăng nhập thành công.", "success")
+                return redirect(next_url)
+            flash("Sai tài khoản hoặc mật khẩu.", "danger")
+
+        return render_template("login.html", next_url=next_url, login_username=admin_username)
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        flash("Đã đăng xuất.", "info")
+        return redirect(url_for("login"))
 
     @app.get("/healthz")
     def healthz():
