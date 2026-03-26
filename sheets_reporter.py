@@ -207,22 +207,8 @@ def build_sheets_service() -> Any:
     - Ưu tiên đọc JSON từ env `GOOGLE_SA_JSON_B64` / `GOOGLE_SA_JSON` (không cần file).
     - Fallback: đọc từ file theo env `GOOGLE_APPLICATION_CREDENTIALS`.
     """
-    # #region agent log
-    import time as _t
-    def _dbg(msg, data, hyp="?"):
-        import json as _j
-        entry = {"sessionId":"941a46","runId":"run1","hypothesisId":hyp,"location":"sheets_reporter.py:build_sheets_service","message":msg,"data":data,"timestamp":int(_t.time()*1000)}
-        try:
-            with open("debug-941a46.log","a",encoding="utf-8") as _f:
-                _f.write(_j.dumps(entry,ensure_ascii=False)+"\n")
-        except Exception:
-            pass
-    # #endregion
     raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
     raw_text = os.getenv("GOOGLE_SA_JSON")
-    # #region agent log
-    _dbg("env_vars_check", {"b64_set": bool(raw_b64), "b64_len": len(raw_b64), "raw_set": bool(raw_text), "raw_len": len(raw_text) if raw_text else 0}, "A")
-    # #endregion
     content = ""
     if raw_b64:
         try:
@@ -231,38 +217,19 @@ def build_sheets_service() -> Any:
             if missing:
                 b64 = b64 + ("=" * missing)
             content = base64.b64decode(b64).decode("utf-8")
-            # #region agent log
-            _dbg("b64_decode_ok", {"content_len": len(content), "starts_with_brace": content.lstrip().startswith("{"), "first_30": content[:30]}, "B")
-            # #endregion
         except Exception as ex:
-            # #region agent log
-            _dbg("b64_decode_fail", {"error": str(ex)}, "B")
-            # #endregion
             raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
     elif raw_text:
         content = raw_text.strip()
         if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
             content = content[1:-1]
-        # #region agent log
-        _dbg("using_raw_text", {"content_len": len(content), "first_30": content[:30]}, "A")
-        # #endregion
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     if content:
         try:
-            # #region agent log
-            _dbg("before_parse", {"has_pk_marker": ('"private_key"' in content), "has_actual_newlines_in_pk": ('\n-----END' in content or '\n-----BEGIN' in content)}, "B,C,D")
-            # #endregion
             info = _try_parse_service_account_json(content)
-            # #region agent log
-            _dbg("parse_ok", {"keys": list(info.keys())[:5]}, "B,D")
-            # #endregion
         except Exception as ex:
-            # #region agent log
-            _dbg("parse_fail", {"error": str(ex)}, "B,C,D")
-            # #endregion
             raise RuntimeError(
-                f"[DBG b64={bool(raw_b64)} raw={bool(raw_text)} clen={len(content)}] "
                 "Service account JSON is invalid. "
                 "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
                 f"Parse error: {ex}"
