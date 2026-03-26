@@ -130,6 +130,7 @@ def _init_report_projects_table(database_url: str) -> None:
     ddl = """
     CREATE TABLE IF NOT EXISTS report_projects (
       id TEXT PRIMARY KEY,
+      project_name TEXT NOT NULL DEFAULT '',
       mcc TEXT NOT NULL,
       cid TEXT NOT NULL,
       sheet_spreadsheet_id TEXT NOT NULL,
@@ -148,6 +149,8 @@ def _init_report_projects_table(database_url: str) -> None:
     with psycopg.connect(database_url, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
+            # Backward-compatible migration for old tables created before project_name existed.
+            cur.execute("ALTER TABLE report_projects ADD COLUMN IF NOT EXISTS project_name TEXT NOT NULL DEFAULT ''")
 
 
 def _db_report_projects_count(database_url: str) -> int:
@@ -181,7 +184,7 @@ def _load_report_projects(path: Path, database_url: Optional[str] = None) -> lis
     if database_url:
         query = """
             SELECT
-              id, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
+              id, project_name, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
               active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
             FROM report_projects
             ORDER BY created_at DESC
@@ -194,19 +197,20 @@ def _load_report_projects(path: Path, database_url: Optional[str] = None) -> lis
                     out.append(
                         {
                             "id": row[0],
-                            "mcc": row[1],
-                            "cid": row[2],
-                            "sheet_spreadsheet_id": row[3],
-                            "sheet_tab_name": row[4],
-                            "schedule_time": row[5],
-                            "time_zone": row[6],
-                            "active": bool(row[7]),
-                            "created_at": row[8],
-                            "last_run_date": row[9] or "",
-                            "last_run_at": row[10] or "",
-                            "last_status": row[11] or "",
-                            "last_error": row[12] or "",
-                            "last_result": row[13] if isinstance(row[13], dict) else {},
+                            "project_name": row[1] or row[5] or "",
+                            "mcc": row[2],
+                            "cid": row[3],
+                            "sheet_spreadsheet_id": row[4],
+                            "sheet_tab_name": row[5],
+                            "schedule_time": row[6],
+                            "time_zone": row[7],
+                            "active": bool(row[8]),
+                            "created_at": row[9],
+                            "last_run_date": row[10] or "",
+                            "last_run_at": row[11] or "",
+                            "last_status": row[12] or "",
+                            "last_error": row[13] or "",
+                            "last_result": row[14] if isinstance(row[14], dict) else {},
                         }
                     )
         return out
@@ -228,6 +232,7 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
             # Ensure all placeholders exist to avoid KeyError in psycopg execute.
             return {
                 "id": str(p.get("id", "")),
+                "project_name": str(p.get("project_name", p.get("sheet_tab_name", ""))),
                 "mcc": str(p.get("mcc", "")),
                 "cid": str(p.get("cid", "")),
                 "sheet_spreadsheet_id": str(p.get("sheet_spreadsheet_id", "")),
@@ -248,13 +253,14 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
 
         upsert = """
             INSERT INTO report_projects (
-              id, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
+              id, project_name, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
               active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
             ) VALUES (
-              %(id)s, %(mcc)s, %(cid)s, %(sheet_spreadsheet_id)s, %(sheet_tab_name)s, %(schedule_time)s, %(time_zone)s,
+              %(id)s, %(project_name)s, %(mcc)s, %(cid)s, %(sheet_spreadsheet_id)s, %(sheet_tab_name)s, %(schedule_time)s, %(time_zone)s,
               %(active)s, %(created_at)s, %(last_run_date)s, %(last_run_at)s, %(last_status)s, %(last_error)s, %(last_result)s
             )
             ON CONFLICT (id) DO UPDATE SET
+              project_name = EXCLUDED.project_name,
               mcc = EXCLUDED.mcc,
               cid = EXCLUDED.cid,
               sheet_spreadsheet_id = EXCLUDED.sheet_spreadsheet_id,
@@ -712,6 +718,7 @@ def create_app() -> Flask:
 
     @app.post("/report-projects")
     def create_report_project():
+        project_name = (request.form.get("project_name") or "").strip()
         mcc = _normalize_customer_id(request.form.get("mcc", ""))
         cid = _normalize_customer_id(request.form.get("cid", ""))
         spreadsheet_id = (request.form.get("sheet_spreadsheet_id") or "").strip()
@@ -720,8 +727,8 @@ def create_app() -> Flask:
         time_zone = (request.form.get("time_zone") or "Asia/Ho_Chi_Minh").strip()
         active = (request.form.get("active") or "on").strip().lower() in ("1", "true", "yes", "on")
 
-        if not (mcc and cid and spreadsheet_id and tab_name):
-            flash("Thiếu thông tin bắt buộc (MCC, CID, Spreadsheet ID, Sheet tab).", "warning")
+        if not (project_name and mcc and cid and spreadsheet_id and tab_name):
+            flash("Thiếu thông tin bắt buộc (Tên project, MCC, CID, Spreadsheet ID, Sheet tab).", "warning")
             return redirect(url_for("report_projects"))
         if not re.match(r"^\d{2}:\d{2}$", schedule_time):
             flash("SCHEDULE_TIME không hợp lệ. Dùng định dạng HH:MM, ví dụ 06:00.", "warning")
@@ -729,6 +736,7 @@ def create_app() -> Flask:
 
         item = {
             "id": str(uuid4()),
+            "project_name": project_name,
             "mcc": mcc,
             "cid": cid,
             "sheet_spreadsheet_id": spreadsheet_id,
@@ -749,6 +757,49 @@ def create_app() -> Flask:
         flash("Đã tạo project báo cáo tự động.", "success")
         return redirect(url_for("report_projects"))
 
+    @app.post("/report-projects/<project_id>/edit")
+    def edit_report_project(project_id: str):
+        project_name = (request.form.get("project_name") or "").strip()
+        mcc = _normalize_customer_id(request.form.get("mcc", ""))
+        cid = _normalize_customer_id(request.form.get("cid", ""))
+        spreadsheet_id = (request.form.get("sheet_spreadsheet_id") or "").strip()
+        tab_name = (request.form.get("sheet_tab_name") or "").strip()
+        schedule_time = (request.form.get("schedule_time") or "06:00").strip()
+        time_zone = (request.form.get("time_zone") or "Asia/Ho_Chi_Minh").strip()
+        active = (request.form.get("active") or "").strip().lower() in ("1", "true", "yes", "on")
+
+        if not (project_name and mcc and cid and spreadsheet_id and tab_name):
+            flash("Thiếu thông tin bắt buộc để cập nhật project.", "warning")
+            return redirect(url_for("report_projects"))
+        if not re.match(r"^\d{2}:\d{2}$", schedule_time):
+            flash("Schedule time không hợp lệ. Dùng định dạng HH:MM, ví dụ 06:00.", "warning")
+            return redirect(url_for("report_projects"))
+
+        updated = False
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file, database_url or None)
+            for p in projects:
+                if p.get("id") != project_id:
+                    continue
+                p["project_name"] = project_name
+                p["mcc"] = mcc
+                p["cid"] = cid
+                p["sheet_spreadsheet_id"] = spreadsheet_id
+                p["sheet_tab_name"] = tab_name
+                p["schedule_time"] = schedule_time
+                p["time_zone"] = time_zone or "Asia/Ho_Chi_Minh"
+                p["active"] = active
+                updated = True
+                break
+            if updated:
+                _save_report_projects(report_projects_file, projects, database_url or None)
+
+        if updated:
+            flash("Đã cập nhật project.", "success")
+        else:
+            flash("Không tìm thấy project để cập nhật.", "warning")
+        return redirect(url_for("report_projects"))
+
     @app.post("/report-projects/<project_id>/toggle")
     def toggle_report_project(project_id: str):
         with _REPORT_PROJECTS_LOCK:
@@ -759,6 +810,21 @@ def create_app() -> Flask:
                     break
             _save_report_projects(report_projects_file, projects, database_url or None)
         flash("Đã cập nhật trạng thái project.", "info")
+        return redirect(url_for("report_projects"))
+
+    @app.post("/report-projects/<project_id>/delete")
+    def delete_report_project(project_id: str):
+        deleted = False
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file, database_url or None)
+            kept = [p for p in projects if p.get("id") != project_id]
+            deleted = len(kept) != len(projects)
+            if deleted:
+                _save_report_projects(report_projects_file, kept, database_url or None)
+        if deleted:
+            flash("Đã xóa project.", "success")
+        else:
+            flash("Không tìm thấy project để xóa.", "warning")
         return redirect(url_for("report_projects"))
 
     @app.post("/report-projects/<project_id>/run-now")

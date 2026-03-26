@@ -61,6 +61,10 @@
       <div class="collapse mt-4 show" id="createProjectForm">
         <form method="post" action="{{ url_for('create_report_project') }}">
           <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label rp-muted mb-1">Tên project</label>
+              <input class="form-control rp-input" name="project_name" placeholder="VD: Fanpage PN - Daily report" required>
+            </div>
             <div class="col-md-4">
               <label class="form-label rp-muted mb-1">MCC</label>
               <input class="form-control rp-input js-customer-id" name="mcc" placeholder="877-691-9182" required>
@@ -69,20 +73,20 @@
               <label class="form-label rp-muted mb-1">CID (Customer ID)</label>
               <input class="form-control rp-input js-customer-id" name="cid" placeholder="188-303-3658" required>
             </div>
-            <div class="col-md-4">
-              <label class="form-label rp-muted mb-1">SHEET_SPREADSHEET_ID</label>
+            <div class="col-md-6">
+              <label class="form-label rp-muted mb-1">Spreadsheet ID</label>
               <input class="form-control rp-input" name="sheet_spreadsheet_id" placeholder="1U9GTuKuqircioXiuObC8hy4Gs_v8NeQUhe-kuh1DS-M" required>
             </div>
             <div class="col-md-6">
-              <label class="form-label rp-muted mb-1">SHEET_TAB_NAME</label>
+              <label class="form-label rp-muted mb-1">Sheet tab name</label>
               <input class="form-control rp-input" name="sheet_tab_name" placeholder="2.2 Report Ads google" required>
             </div>
             <div class="col-md-3">
-              <label class="form-label rp-muted mb-1">SCHEDULE_TIME (HH:MM)</label>
+              <label class="form-label rp-muted mb-1">Schedule time (HH:MM)</label>
               <input class="form-control rp-input" name="schedule_time" value="06:00" required>
             </div>
             <div class="col-md-3">
-              <label class="form-label rp-muted mb-1">Time_zone</label>
+              <label class="form-label rp-muted mb-1">Time zone</label>
               <input class="form-control rp-input" name="time_zone" value="Asia/Ho_Chi_Minh" required>
             </div>
             <div class="col-md-12 form-check mt-1 ms-2">
@@ -105,9 +109,9 @@
           <thead>
             <tr>
               <th>Tên project</th>
-              <th>Page ID</th>
-              <th>Sheet</th>
-              <th>Schedule</th>
+              <th>CID (Customer ID)</th>
+              <th>Spreadsheet ID</th>
+              <th>Schedule time</th>
               <th>TZ</th>
               <th>Trạng thái</th>
               <th>Hành động</th>
@@ -116,7 +120,7 @@
           <tbody>
             {% for p in projects %}
               <tr>
-                <td class="fw-semibold">{{ p.sheet_tab_name }}</td>
+                <td class="fw-semibold">{{ p.project_name or p.sheet_tab_name }}</td>
                 <td class="font-monospace">{{ p.cid|cidfmt }}</td>
                 <td class="font-monospace small">{{ p.sheet_spreadsheet_id }}</td>
                 <td class="font-monospace">{{ p.schedule_time }}</td>
@@ -133,10 +137,31 @@
                     <form method="post" action="{{ url_for('run_report_project_now', project_id=p.id) }}">
                       <button type="submit" class="btn btn-sm rp-btn-ghost">Chạy ngay</button>
                     </form>
+                    <button
+                      type="button"
+                      class="btn btn-sm rp-btn-ghost js-edit-project"
+                      data-project='{{ p|tojson|forceescape }}'
+                      data-bs-toggle="modal"
+                      data-bs-target="#editProjectModal"
+                    >
+                      Sửa
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm rp-btn-ghost js-view-result"
+                      data-project='{{ p|tojson|forceescape }}'
+                      data-bs-toggle="modal"
+                      data-bs-target="#resultProjectModal"
+                    >
+                      Kết quả
+                    </button>
                     <form method="post" action="{{ url_for('toggle_report_project', project_id=p.id) }}">
                       <button type="submit" class="btn btn-sm rp-btn-ghost">
                         {% if p.active %}Tạm dừng{% else %}Kích hoạt{% endif %}
                       </button>
+                    </form>
+                    <form method="post" action="{{ url_for('delete_report_project', project_id=p.id) }}" onsubmit="return confirm('Bạn có chắc muốn xóa project này?');">
+                      <button type="submit" class="btn btn-sm btn-danger">Xóa</button>
                     </form>
                   </div>
                 </td>
@@ -153,6 +178,97 @@
       </div>
     </div>
   </div>
+
+  <div class="modal fade" id="editProjectModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content rp-card">
+        <form method="post" id="editProjectForm">
+          <div class="modal-header border-0">
+            <h5 class="modal-title rp-title">Sửa project</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label rp-muted mb-1">Tên project</label>
+                <input class="form-control rp-input" name="project_name" id="editProjectName" required>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label rp-muted mb-1">MCC</label>
+                <input class="form-control rp-input js-customer-id-modal" name="mcc" id="editMcc" required>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label rp-muted mb-1">CID (Customer ID)</label>
+                <input class="form-control rp-input js-customer-id-modal" name="cid" id="editCid" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label rp-muted mb-1">Spreadsheet ID</label>
+                <input class="form-control rp-input" name="sheet_spreadsheet_id" id="editSpreadsheetId" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label rp-muted mb-1">Sheet tab name</label>
+                <input class="form-control rp-input" name="sheet_tab_name" id="editSheetTabName" required>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label rp-muted mb-1">Schedule time (HH:MM)</label>
+                <input class="form-control rp-input" name="schedule_time" id="editScheduleTime" required>
+              </div>
+              <div class="col-md-5">
+                <label class="form-label rp-muted mb-1">Time zone</label>
+                <input class="form-control rp-input" name="time_zone" id="editTimeZone" required>
+              </div>
+              <div class="col-md-4 d-flex align-items-end">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" value="on" id="editActive" name="active">
+                  <label class="form-check-label rp-muted" for="editActive">Active</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer border-0">
+            <button type="button" class="btn rp-btn-ghost" data-bs-dismiss="modal">Hủy</button>
+            <button type="submit" class="btn rp-btn-main">Lưu thay đổi</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="resultProjectModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content rp-card">
+        <div class="modal-header border-0">
+          <h5 class="modal-title rp-title">Kết quả chạy project</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="small rp-muted mb-2">Tên project</div>
+          <div class="fw-semibold mb-3" id="resultProjectName">-</div>
+
+          <div class="row g-3 mb-2">
+            <div class="col-md-4">
+              <div class="small rp-muted">Trạng thái</div>
+              <div id="resultStatus">-</div>
+            </div>
+            <div class="col-md-4">
+              <div class="small rp-muted">Lần chạy gần nhất</div>
+              <div id="resultRunAt">-</div>
+            </div>
+            <div class="col-md-4">
+              <div class="small rp-muted">Ngày đã ghi</div>
+              <div id="resultRunDate">-</div>
+            </div>
+          </div>
+
+          <div class="small rp-muted mb-2">Chi tiết</div>
+          <pre class="p-3 rounded" style="background:#0a1130;border:1px solid #27367a;color:#e7ebff;max-height:320px;overflow:auto" id="resultDetail">-</pre>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn rp-btn-ghost" data-bs-dismiss="modal">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
   (function () {
     function toDashedCustomerId(v) {
@@ -166,6 +282,53 @@
         this.value = toDashedCustomerId(this.value);
       });
       el.value = toDashedCustomerId(el.value);
+    });
+
+    function parseProjectPayload(el) {
+      var raw = el.getAttribute('data-project') || '{}';
+      try {
+        return JSON.parse(raw);
+      } catch (e) {
+        return {};
+      }
+    }
+
+    document.querySelectorAll('.js-edit-project').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var p = parseProjectPayload(this);
+        var id = p.id || '';
+        var form = document.getElementById('editProjectForm');
+        form.action = "{{ url_for('report_projects') }}/" + encodeURIComponent(id) + "/edit";
+        document.getElementById('editProjectName').value = p.project_name || p.sheet_tab_name || '';
+        document.getElementById('editMcc').value = toDashedCustomerId(p.mcc || '');
+        document.getElementById('editCid').value = toDashedCustomerId(p.cid || '');
+        document.getElementById('editSpreadsheetId').value = p.sheet_spreadsheet_id || '';
+        document.getElementById('editSheetTabName').value = p.sheet_tab_name || '';
+        document.getElementById('editScheduleTime').value = p.schedule_time || '06:00';
+        document.getElementById('editTimeZone').value = p.time_zone || 'Asia/Ho_Chi_Minh';
+        document.getElementById('editActive').checked = !!p.active;
+      });
+    });
+
+    document.querySelectorAll('.js-customer-id-modal').forEach(function (el) {
+      el.addEventListener('input', function () {
+        this.value = toDashedCustomerId(this.value);
+      });
+    });
+
+    document.querySelectorAll('.js-view-result').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var p = parseProjectPayload(this);
+        document.getElementById('resultProjectName').textContent = p.project_name || p.sheet_tab_name || '-';
+        document.getElementById('resultStatus').textContent = p.last_status || '-';
+        document.getElementById('resultRunAt').textContent = p.last_run_at || '-';
+        document.getElementById('resultRunDate').textContent = p.last_run_date || '-';
+        var detail = {
+          last_result: p.last_result || {},
+          last_error: p.last_error || ''
+        };
+        document.getElementById('resultDetail').textContent = JSON.stringify(detail, null, 2);
+      });
     });
   })();
 </script>
