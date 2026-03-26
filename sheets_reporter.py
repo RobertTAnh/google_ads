@@ -35,8 +35,10 @@ def _normalize_cell_text(s: Any) -> str:
 
 def _try_parse_service_account_json(content: str) -> Dict[str, Any]:
     """
-    Parse service account JSON with repair for common malformed private_key strings
-    where raw newlines are pasted into JSON.
+    Parse service account JSON with repair for common malformed private_key strings.
+    Strategy 1: direct json.loads.
+    Strategy 2: regex-based extraction of private_key PEM, replace actual newlines with \\n.
+    Strategy 3: brute-force strip all literal newlines inside the PEM block.
     """
     try:
         parsed = json.loads(content)
@@ -45,27 +47,62 @@ def _try_parse_service_account_json(content: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    marker = '"private_key": "'
-    start = content.find(marker)
-    if start == -1:
-        raise RuntimeError("Service account JSON parse failed (missing private_key marker).")
-    key_start = start + len(marker)
-    end_marker = '\n",\n  "client_email"'
-    key_end = content.find(end_marker, key_start)
-    if key_end == -1:
-        # Fallback if spacing differs
-        end_marker = '",\n  "client_email"'
-        key_end = content.find(end_marker, key_start)
-        if key_end == -1:
-            raise RuntimeError("Service account JSON parse failed (cannot locate private_key end).")
+    # Strategy 2: use regex to capture everything between BEGIN/END PRIVATE KEY markers
+    # and repair actual newlines -> \n escape sequences.
+    PK_RE = re.compile(
+        r'("private_key"\s*:\s*")(-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----[^\n"]*)',
+        re.DOTALL,
+    )
+    m = PK_RE.search(content)
+    if m:
+        prefix = m.group(1)
+        pem_raw = m.group(2)
+        pem_fixed = pem_raw.replace("\r\n", "\n").replace("\n", "\\n")
+        repaired = content[: m.start(2)] + pem_fixed + content[m.end(2) :]
+        try:
+            parsed = json.loads(repaired)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
 
-    key_raw = content[key_start:key_end]
-    key_fixed = key_raw.replace("\\", "\\\\").replace("\r\n", "\n").replace("\n", "\\n")
-    repaired = content[:key_start] + key_fixed + content[key_end:]
-    parsed = json.loads(repaired)
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Service account JSON parsed but invalid object.")
-    return parsed
+    # Strategy 3: replace ALL literal newlines inside string values (nuclear option)
+    # Walk the JSON char by char; when inside a string, replace \n with \\n.
+    chars = list(content)
+    in_str = False
+    i = 0
+    result: list[str] = []
+    while i < len(chars):
+        c = chars[i]
+        if not in_str:
+            if c == '"':
+                in_str = True
+            result.append(c)
+        else:
+            if c == '\\' and i + 1 < len(chars):
+                result.append(c)
+                result.append(chars[i + 1])
+                i += 2
+                continue
+            elif c == '"':
+                in_str = False
+                result.append(c)
+            elif c == '\n':
+                result.append('\\n')
+            elif c == '\r':
+                result.append('\\r')
+            else:
+                result.append(c)
+        i += 1
+
+    try:
+        parsed = json.loads("".join(result))
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as ex:
+        raise RuntimeError(f"Service account JSON could not be repaired: {ex}") from ex
+
+    raise RuntimeError("Service account JSON parsed but invalid object.")
 
 
 def _find_section_row(values: List[List[Any]], section_name: str, *, col_idx: int = 1) -> Optional[int]:
@@ -170,30 +207,62 @@ def build_sheets_service() -> Any:
     - Ưu tiên đọc JSON từ env `GOOGLE_SA_JSON_B64` / `GOOGLE_SA_JSON` (không cần file).
     - Fallback: đọc từ file theo env `GOOGLE_APPLICATION_CREDENTIALS`.
     """
+    # #region agent log
+    import time as _t
+    def _dbg(msg, data, hyp="?"):
+        import json as _j
+        entry = {"sessionId":"941a46","runId":"run1","hypothesisId":hyp,"location":"sheets_reporter.py:build_sheets_service","message":msg,"data":data,"timestamp":int(_t.time()*1000)}
+        try:
+            with open("debug-941a46.log","a",encoding="utf-8") as _f:
+                _f.write(_j.dumps(entry,ensure_ascii=False)+"\n")
+        except Exception:
+            pass
+    # #endregion
     raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
     raw_text = os.getenv("GOOGLE_SA_JSON")
+    # #region agent log
+    _dbg("env_vars_check", {"b64_set": bool(raw_b64), "b64_len": len(raw_b64), "raw_set": bool(raw_text), "raw_len": len(raw_text) if raw_text else 0}, "A")
+    # #endregion
     content = ""
     if raw_b64:
         try:
-            # Normalize: remove whitespace/newlines and auto-fix missing '=' padding.
             b64 = "".join(raw_b64.split())
             missing = (-len(b64)) % 4
             if missing:
                 b64 = b64 + ("=" * missing)
             content = base64.b64decode(b64).decode("utf-8")
+            # #region agent log
+            _dbg("b64_decode_ok", {"content_len": len(content), "starts_with_brace": content.lstrip().startswith("{"), "first_30": content[:30]}, "B")
+            # #endregion
         except Exception as ex:
+            # #region agent log
+            _dbg("b64_decode_fail", {"error": str(ex)}, "B")
+            # #endregion
             raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
     elif raw_text:
         content = raw_text.strip()
         if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
             content = content[1:-1]
+        # #region agent log
+        _dbg("using_raw_text", {"content_len": len(content), "first_30": content[:30]}, "A")
+        # #endregion
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     if content:
         try:
+            # #region agent log
+            _dbg("before_parse", {"has_pk_marker": ('"private_key"' in content), "has_actual_newlines_in_pk": ('\n-----END' in content or '\n-----BEGIN' in content)}, "B,C,D")
+            # #endregion
             info = _try_parse_service_account_json(content)
+            # #region agent log
+            _dbg("parse_ok", {"keys": list(info.keys())[:5]}, "B,D")
+            # #endregion
         except Exception as ex:
+            # #region agent log
+            _dbg("parse_fail", {"error": str(ex)}, "B,C,D")
+            # #endregion
             raise RuntimeError(
+                f"[DBG b64={bool(raw_b64)} raw={bool(raw_text)} clen={len(content)}] "
                 "Service account JSON is invalid. "
                 "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
                 f"Parse error: {ex}"
