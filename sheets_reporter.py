@@ -248,6 +248,62 @@ def build_sheets_service() -> Any:
             else:
                 info["private_key"] = pk_s
 
+            # #region agent log
+            # PEM sanity-check & optional repair for common corruption where '+' becomes ' '.
+            # Never log the PEM content; only log flags/counts.
+            try:
+                pk_chk = info.get("private_key") if isinstance(info.get("private_key"), str) else ""
+                pem_has_begin = ("-----BEGIN PRIVATE KEY-----" in pk_chk) or ("-----BEGIN RSA PRIVATE KEY-----" in pk_chk)
+                pem_has_end = ("-----END PRIVATE KEY-----" in pk_chk) or ("-----END RSA PRIVATE KEY-----" in pk_chk)
+                pem_spaces = pk_chk.count(" ")
+                pem_tabs = pk_chk.count("\t")
+                pem_cr = pk_chk.count("\r")
+                pem_lf = pk_chk.count("\n")
+                pem_body_b64_ok = False
+                pem_body_b64_ok_after_space_fix = False
+                if pem_has_begin and pem_has_end:
+                    begin = "-----BEGIN PRIVATE KEY-----" if "-----BEGIN PRIVATE KEY-----" in pk_chk else "-----BEGIN RSA PRIVATE KEY-----"
+                    end = "-----END PRIVATE KEY-----" if "-----END PRIVATE KEY-----" in pk_chk else "-----END RSA PRIVATE KEY-----"
+                    body = pk_chk.split(begin, 1)[1].split(end, 1)[0]
+                    body_compact = "".join(body.split())
+                    try:
+                        base64.b64decode(body_compact, validate=True)
+                        pem_body_b64_ok = True
+                    except Exception:
+                        if " " in body_compact:
+                            try:
+                                base64.b64decode(body_compact.replace(" ", "+"), validate=True)
+                                pem_body_b64_ok_after_space_fix = True
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                base64.b64decode(body_compact.replace(" ", "+"), validate=True)
+                                pem_body_b64_ok_after_space_fix = True
+                            except Exception:
+                                pass
+
+                    # Apply repair only if it makes the base64 body valid.
+                    if (not pem_body_b64_ok) and pem_body_b64_ok_after_space_fix:
+                        repaired_compact = body_compact.replace(" ", "+")
+                        wrapped = "\n".join(repaired_compact[i : i + 64] for i in range(0, len(repaired_compact), 64))
+                        info["private_key"] = f"{begin}\n{wrapped}\n{end}\n"
+
+                # Emit a compact debug string in errors (still secret-safe).
+                info["_pem_dbg"] = {
+                    "pem_has_begin": bool(pem_has_begin),
+                    "pem_has_end": bool(pem_has_end),
+                    "pem_spaces": int(pem_spaces),
+                    "pem_tabs": int(pem_tabs),
+                    "pem_cr": int(pem_cr),
+                    "pem_lf": int(pem_lf),
+                    "pem_body_b64_ok": bool(pem_body_b64_ok),
+                    "pem_body_b64_ok_after_space_fix": bool(pem_body_b64_ok_after_space_fix),
+                }
+            except Exception:
+                pass
+            # #endregion
+
         try:
             creds = Credentials.from_service_account_info(info, scopes=scopes)
         except Exception as ex:
@@ -264,6 +320,7 @@ def build_sheets_service() -> Any:
                 "pk_has_end": bool(has_end2),
                 "pk_has_real_newlines": ("\n" in pk2s),
                 "pk_has_literal_slash_n": ("\\n" in pk2s),
+                "pem": info.get("_pem_dbg", None),
             }
             raise RuntimeError(
                 "Unable to load service account private_key PEM. "
