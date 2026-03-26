@@ -1,0 +1,89 @@
+{% extends "layout.html" %}
+
+{% block title %}Create Campaign{% endblock %}
+
+{% block content %}
+  <div class="row">
+    <div class="col-lg-8">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <div>
+          <h1 class="h3 mb-1">Create Performance Max Campaign</h1>
+          <div class="text-muted">Local lead generation starter (creative mocked with placeholders).</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <form method="post" action="{{ url_for('create_campaign_submit') }}">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">Customer ID (client account)</label>
+                <input class="form-control" name="customer_id" placeholder="1234567890" required>
+                <div class="form-text">This is the client account under your MCC.</div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Campaign Name</label>
+                <input class="form-control" name="campaign_name" placeholder="PMax - Appliance Repair - Leads" required>
+              </div>
+
+              <div class="col-md-6">
+                <label class="form-label">Daily Budget (USD)</label>
+                <input class="form-control" name="daily_budget" type="number" step="0.01" min="0.01" value="50.00" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Target CPA (USD) (optional)</label>
+                <input class="form-control" name="target_cpa" type="number" step="0.01" min="0">
+                <div class="form-text">Leave blank to just maximize conversions.</div>
+              </div>
+
+              <div class="col-md-6">
+                <label class="form-label">Business Name</label>
+                <input class="form-control" name="business_name" placeholder="Acme Appliance Repair">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Final URL</label>
+                <input class="form-control" name="final_url" placeholder="https://example.com">
+              </div>
+
+              <div class="col-12">
+                <label class="form-label">Geo Target Constant IDs (optional)</label>
+                <input class="form-control" name="geo_target_constant_ids" placeholder="1023191,1016367">
+                <div class="form-text">
+                  Comma-separated. Example: United States is often <span class="font-monospace">2840</span>.
+                  Use the GeoTargetConstant reference or lookup in your tooling.
+                </div>
+              </div>
+
+              <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Create Campaign</button>
+                <a class="btn btn-outline-secondary" href="{{ url_for('dashboard') }}">Back to Dashboard</a>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="alert alert-warning mt-3 mb-0">
+        This creates a <strong>paused</strong> PMax campaign with a minimal placeholder Asset Group.
+        Replace placeholder assets with real creative and validate policy requirements before enabling.
+      </div>
+    </div>
+
+    <div class="col-lg-4 mt-3 mt-lg-0">
+      <div class="card">
+        <div class="card-body">
+          <h2 class="h6">Required config</h2>
+          <div class="text-muted small mb-2">
+            Ensure your project root contains <span class="font-monospace">google-ads.yaml</span> and that it includes your MCC
+            <span class="font-monospace">login_customer_id</span>.
+          </div>
+          <h2 class="h6 mt-3">Notes</h2>
+          <ul class="small text-muted mb-0">
+            <li>PMax creative is mocked with text assets only (demo).</li>
+            <li>Location targeting uses CampaignCriterion location (GeoTargetConstant IDs).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

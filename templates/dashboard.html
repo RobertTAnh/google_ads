@@ -1,0 +1,328 @@
+{% extends "layout.html" %}
+
+{% block title %}Tổng quan{% endblock %}
+
+{% block content %}
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+      <h1 class="h3 mb-1">Tổng quan tài khoản</h1>
+      <div class="text-muted">Chọn tài khoản con dưới MCC (ô tìm kiếm, danh sách hoặc menu trên), sau đó bấm <strong>Lấy báo cáo</strong> để xem chỉ số ngày hôm qua.</div>
+    </div>
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-primary" href="{{ url_for('create_campaign_form') }}">Create PMax Campaign</a>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <form class="row g-2 align-items-end" method="get" action="{{ url_for('dashboard') }}">
+        <div class="col-md-7">
+          <label class="form-label">Tìm &amp; chọn tài khoản (ID / tên)</label>
+          <input
+            class="form-control"
+            name="customer_id"
+            list="accounts"
+            placeholder="Ví dụ: 240-746-9372 hoặc gõ tên tài khoản…"
+            value="{{ current_customer_id or '' }}"
+            autocomplete="off"
+          >
+          <datalist id="accounts">
+            {% for a in child_accounts %}
+              <option value="{{ a.customer_name }} ({{ a.customer_id }})"></option>
+            {% endfor %}
+          </datalist>
+          <div class="form-text">
+            Gõ để tìm trong các tk con dưới MCC. Bạn cũng có thể nhập ID trực tiếp, rồi bấm « Áp dụng tài khoản ».
+          </div>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-primary w-100" type="submit">Áp dụng tài khoản</button>
+        </div>
+        <div class="col-md-2">
+          <a class="btn btn-outline-secondary w-100" href="{{ url_for('dashboard') }}">Reset</a>
+        </div>
+      </form>
+
+      {% if child_accounts and not current_customer_id %}
+        <div class="mt-3">
+          <div class="small text-muted mb-2">Tài khoản con (nhấp để chọn — chưa tải báo cáo)</div>
+          <div class="d-flex flex-wrap gap-2">
+            {% for a in child_accounts[:12] %}
+              <a class="btn btn-sm btn-outline-dark"
+                 href="{{ url_for('dashboard') }}?customer_id={{ a.customer_id }}">
+                {% if a.is_manager %}
+                  <span class="badge text-bg-secondary me-1">M</span>
+                {% endif %}
+                {{ a.customer_name or a.customer_id }}
+              </a>
+            {% endfor %}
+          </div>
+          {% if child_accounts|length > 12 %}
+            <div class="small text-muted mt-2">…và {{ child_accounts|length - 12 }} tài khoản khác (dùng ô tìm kiếm).</div>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      <details class="mt-3 border rounded bg-white">
+        <summary class="px-3 py-2 fw-semibold list-unstyled" style="cursor: pointer;">
+          Xem toàn bộ tài khoản trong MCC
+          <span class="text-muted small fw-normal ms-1">
+            ({% if child_accounts %}{{ child_accounts|length }}{% else %}0{% endif %} tk)
+          </span>
+        </summary>
+        <div class="px-3 pb-3 pt-1 border-top">
+          {% if mcc_context_error %}
+            <div class="alert alert-warning mb-0 small">{{ mcc_context_error }}</div>
+          {% elif child_accounts %}
+            <label class="form-label small mb-1" for="mccAccountSelect">Chọn trong danh sách rồi bấm áp dụng</label>
+            <div class="row g-2 align-items-end">
+              <div class="col-md-8">
+                <select class="form-select font-monospace" id="mccAccountSelect" size="{{ [child_accounts|length, 14]|min }}">
+                  {% for a in child_accounts %}
+                    <option value="{{ a.customer_id }}">
+                      [L{{ a.level }}] {{ a.customer_name or a.customer_id }} — {{ a.customer_id }}{% if a.is_manager %} · MCC{% endif %}{% if a.status %} · {{ a.status }}{% endif %}
+                    </option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-4">
+                <button type="button" class="btn btn-primary w-100" id="mccAccountLoadBtn">Áp dụng tài khoản đã chọn</button>
+              </div>
+            </div>
+          {% else %}
+            <div class="text-muted small">Chưa có dữ liệu — kiểm tra cấu hình MCC hoặc OAuth.</div>
+          {% endif %}
+        </div>
+      </details>
+    </div>
+  </div>
+
+  {% if show_report_cta and report_url %}
+    <div class="alert alert-{{ 'warning' if error else 'info' }} d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" id="reportCtaBanner" role="status">
+      <span>
+        {% if error %}
+          Không tải được báo cáo. Xem chi tiết phía dưới và thử lại.
+        {% elif can_fetch_report_js %}
+          Đã chọn tài khoản. Bấm để lấy chỉ số ngày hôm qua (chi phí, click, hiển thị, chuyển đổi).
+        {% else %}
+          Bấm để tải báo cáo cho các tài khoản trong <span class="font-monospace">CLIENT_CUSTOMER_IDS</span>.
+        {% endif %}
+      </span>
+      <div class="d-flex gap-2 flex-shrink-0">
+        {% if can_fetch_report_js %}
+          <button type="button" class="btn btn-success" id="btnFetchReport" data-customer-id="{{ normalized_customer_id }}">Lấy báo cáo</button>
+          <a class="btn btn-outline-secondary btn-sm" href="{{ report_url }}">Tải full page</a>
+        {% else %}
+          <a class="btn btn-success" href="{{ report_url }}">Lấy báo cáo</a>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if error %}
+    <div class="alert alert-danger">
+      <div class="fw-semibold mb-2">Google Ads API</div>
+      <pre class="mb-0" style="white-space: pre-wrap;">{{ error }}</pre>
+    </div>
+  {% endif %}
+
+  {% if optimization %}
+    <div class="card mb-4">
+      <div class="card-body">
+        <h2 class="h5">Budget Optimization Results</h2>
+        <div class="text-muted mb-2">Customer: {{ optimized_customer_id }} | Target CPA: {{ "%.2f"|format(target_cpa) }}</div>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <div class="fw-semibold mb-2">Updated</div>
+            <ul class="list-group">
+              {% for r in optimization.updated %}
+                <li class="list-group-item">
+                  <div class="fw-semibold">{{ r.campaign_name }} ({{ r.campaign_id }})</div>
+                  <div class="text-muted">
+                    CPA: {{ "%.2f"|format(r.cpa) }} |
+                    Budget: {{ "%.2f"|format(r.old_daily_budget) }} → {{ "%.2f"|format(r.new_daily_budget) }}
+                  </div>
+                </li>
+              {% else %}
+                <li class="list-group-item text-muted">No campaigns updated.</li>
+              {% endfor %}
+            </ul>
+          </div>
+          <div class="col-md-6">
+            <div class="fw-semibold mb-2">Skipped</div>
+            <ul class="list-group">
+              {% for r in optimization.skipped %}
+                <li class="list-group-item">
+                  <div class="fw-semibold">{{ r.campaign_name }} ({{ r.campaign_id }})</div>
+                  <div class="text-muted">{{ r.reason }}</div>
+                </li>
+              {% else %}
+                <li class="list-group-item text-muted">No campaigns skipped.</li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-body">
+      <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+        <div>
+          <h2 class="h5 mb-0">Báo cáo ngày hôm qua</h2>
+          <div class="text-muted small" id="reportDateHint">
+            {% if report_date %}
+              Ngày dữ liệu (lịch local tham khảo): {{ report_date }} · GAQL <code class="small">segments.date DURING YESTERDAY</code>
+            {% else %}
+              Chưa tải — múi giờ theo tài khoản quảng cáo khi có dữ liệu.
+            {% endif %}
+          </div>
+        </div>
+        <div class="text-muted small">Nguồn: <code>GoogleAdsService.search_stream</code> · <code>FROM campaign</code> · <code>segments.date DURING YESTERDAY</code></div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-hover align-middle table-sm">
+          <thead>
+            <tr>
+              <th>Customer ID</th>
+              <th>Tài khoản</th>
+              <th class="font-monospace">Campaign ID</th>
+              <th>Chiến dịch</th>
+              <th class="text-end">Click</th>
+              <th class="text-end">Hiển thị</th>
+              <th class="text-end" title="Định dạng VN: dấu chấm phân cách hàng nghìn (vd 545.891 ₫)">Chi phí (VNĐ)</th>
+              <th class="text-end">Chuyển đổi</th>
+            </tr>
+          </thead>
+          <tbody id="reportTableBody">
+            {% if want_report and rows %}
+              {% for r in rows %}
+                <tr>
+                  <td class="font-monospace">{{ r.customer_id }}</td>
+                  <td>{{ r.customer_name or "-" }}</td>
+                  <td class="font-monospace">{{ r.campaign_id }}</td>
+                  <td>{{ r.campaign_name or "-" }}</td>
+                  <td class="text-end">{{ r.clicks }}</td>
+                  <td class="text-end">{{ r.impressions }}</td>
+                  <td class="text-end text-nowrap">{{ r.cost|vnd }}</td>
+                  <td class="text-end">{{ "%.2f"|format(r.conversions) }}</td>
+                </tr>
+              {% endfor %}
+              <tr class="table-secondary fw-semibold">
+                <td colspan="4" class="text-end">Tổng (theo bảng)</td>
+                <td class="text-end">{{ rows|sum(attribute='clicks') }}</td>
+                <td class="text-end">{{ rows|sum(attribute='impressions') }}</td>
+                <td class="text-end text-nowrap">{{ (rows|sum(attribute='cost'))|vnd }}</td>
+                <td class="text-end">{{ "%.2f"|format(rows|sum(attribute='conversions')) }}</td>
+              </tr>
+            {% elif want_report and error %}
+              <tr>
+                <td colspan="8" class="text-center text-muted py-4">Không có dòng dữ liệu (lỗi phía trên).</td>
+              </tr>
+            {% else %}
+              <tr id="reportPlaceholderRow">
+                <td colspan="8" class="text-center text-muted py-4">
+                  Chưa có dữ liệu. Chọn tài khoản ở trên rồi bấm <strong>Lấy báo cáo</strong>.
+                </td>
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-3 text-muted small">
+        Có thể set <span class="font-monospace">CLIENT_CUSTOMER_IDS</span> để dùng nhiều tài khoản cùng lúc (khi không chọn <span class="font-monospace">customer_id</span> trên URL).
+      </div>
+      <div class="mt-2 text-muted small">
+        API JSON (danh sách MCC): <a href="{{ url_for('api_mcc_accounts') }}">{{ url_for('api_mcc_accounts') }}</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__API_YESTERDAY_REPORT = {{ url_for('api_yesterday_report') | tojson }};
+  </script>
+  <script>
+    (function () {
+      var btn = document.getElementById('mccAccountLoadBtn');
+      var sel = document.getElementById('mccAccountSelect');
+      if (!btn || !sel) return;
+      btn.addEventListener('click', function () {
+        var id = sel.value;
+        if (!id) return;
+        var base = {{ url_for('dashboard') | tojson }};
+        window.location.href = base + '?customer_id=' + encodeURIComponent(id);
+      });
+    })();
+  </script>
+  <script>
+    function formatVndThousands(n) {
+      var v = Math.round(Number(n));
+      return v.toLocaleString('vi-VN', { maximumFractionDigits: 0 }) + ' ₫';
+    }
+    (function () {
+      var btn = document.getElementById('btnFetchReport');
+      var tbody = document.getElementById('reportTableBody');
+      var dateHint = document.getElementById('reportDateHint');
+      var banner = document.getElementById('reportCtaBanner');
+      if (!btn || !tbody) return;
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-customer-id');
+        if (!id) return;
+        btn.disabled = true;
+        var orig = btn.textContent;
+        btn.textContent = 'Đang tải…';
+        var url = window.__API_YESTERDAY_REPORT + '?customer_id=' + encodeURIComponent(id);
+        fetch(url, { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data.ok) throw new Error(data.error || 'Lỗi không xác định');
+            var list = data.rows || [];
+            var tc = 0, ti = 0, tk = 0, tconv = 0;
+            var html = '';
+            list.forEach(function (row) {
+              tc += (+row.clicks) || 0;
+              ti += (+row.impressions) || 0;
+              tk += Number(row.cost) || 0;
+              tconv += Number(row.conversions) || 0;
+              html += '<tr><td class="font-monospace">' + escapeHtml(String(row.customer_id)) + '</td>' +
+                '<td>' + escapeHtml(row.customer_name || '-') + '</td>' +
+                '<td class="font-monospace">' + escapeHtml(String(row.campaign_id)) + '</td>' +
+                '<td>' + escapeHtml(row.campaign_name || '-') + '</td>' +
+                '<td class="text-end">' + row.clicks + '</td>' +
+                '<td class="text-end">' + row.impressions + '</td>' +
+                '<td class="text-end text-nowrap">' + formatVndThousands(row.cost) + '</td>' +
+                '<td class="text-end">' + Number(row.conversions).toFixed(2) + '</td></tr>';
+            });
+            if (list.length) {
+              html += '<tr class="table-secondary fw-semibold"><td colspan="4" class="text-end">Tổng (theo bảng)</td>' +
+                '<td class="text-end">' + tc + '</td>' +
+                '<td class="text-end">' + ti + '</td>' +
+                '<td class="text-end text-nowrap">' + formatVndThousands(tk) + '</td>' +
+                '<td class="text-end">' + tconv.toFixed(2) + '</td></tr>';
+            }
+            tbody.innerHTML = html || '<tr><td colspan="8" class="text-center text-muted py-4">Không có chiến dịch có dữ liệu ngày hôm qua.</td></tr>';
+            if (dateHint && data.report_date) {
+              dateHint.textContent = 'Ngày dữ liệu (lịch local tham khảo): ' + data.report_date +
+                ' · GAQL segments.date DURING YESTERDAY';
+            }
+            if (banner) banner.remove();
+          })
+          .catch(function (e) {
+            alert('Lỗi: ' + (e.message || String(e)));
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = orig;
+          });
+      });
+      function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+      }
+    })();
+  </script>
+{% endblock %}

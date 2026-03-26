@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+*.pyc
+
+# Secrets / credentials
+google-ads.yaml
+client_secret_*.json
+leafy-pilot-*.json
+

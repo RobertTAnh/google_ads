@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Google Ads MCC Dashboard{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom">
+      <div class="container-fluid">
+        <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('dashboard') }}">
+          <span class="fw-semibold">Google Ads</span>
+          <span class="badge text-bg-secondary">Internal</span>
+        </a>
+
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+
+        <div class="collapse navbar-collapse" id="nav">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('dashboard') }}">Tổng quan</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('create_campaign_form') }}">Tạo chiến dịch</a>
+            </li>
+          </ul>
+
+          {% if mcc_id %}
+            <div class="dropdown">
+              <button
+                class="btn btn-sm btn-outline-light dropdown-toggle d-flex align-items-center gap-2"
+                type="button"
+                id="accountSwitcher"
+                data-bs-toggle="dropdown"
+                aria-expanded="false"
+              >
+                <div class="text-start">
+                  <div class="small fw-semibold">{{ mcc_name or "Manager" }}</div>
+                  <div class="small text-white-50 font-monospace">{{ mcc_id }}</div>
+                </div>
+              </button>
+              <div class="dropdown-menu dropdown-menu-end p-0 shadow" aria-labelledby="accountSwitcher" style="min-width: 360px;">
+                <div class="p-3 border-bottom">
+                  <div class="fw-semibold small mb-1">{{ mcc_name or "Manager" }}</div>
+                  <div class="small text-muted">Quản lý tài khoản khách hàng</div>
+                </div>
+                <div class="p-2 border-bottom">
+                  <div class="input-group input-group-sm">
+                    <input
+                      type="text"
+                      class="form-control"
+                      id="accountSearchInput"
+                      placeholder="Tìm bằng tên hoặc ID tài khoản"
+                      autocomplete="off"
+                    >
+                    <span class="input-group-text">
+                      <span class="bi bi-search"></span>
+                    </span>
+                  </div>
+                </div>
+                <div
+                  id="accountListContainer"
+                  class="py-1"
+                  style="max-height: 320px; overflow-y: auto;"
+                >
+                  {% if mcc_context_error %}
+                    <div class="px-3 py-2 small text-danger border-bottom">
+                      Không thể tải danh sách tài khoản: {{ mcc_context_error }}
+                    </div>
+                  {% endif %}
+                  {% for a in child_accounts %}
+                    <button
+                      type="button"
+                      class="dropdown-item d-flex justify-content-between align-items-center account-item"
+                      data-account-id="{{ a.customer_id }}"
+                      data-account-name="{{ a.customer_name }}"
+                    >
+                      <div>
+                        <div class="small">{{ a.customer_name or a.customer_id }}</div>
+                        <div class="small text-muted font-monospace">
+                          Cấp {{ a.level }} · {{ a.customer_id }}
+                        </div>
+                      </div>
+                      {% if a.is_manager %}
+                        <span class="badge text-bg-secondary">MCC</span>
+                      {% endif %}
+                    </button>
+                  {% else %}
+                    <div class="px-3 py-2 small text-muted">Không tìm thấy tài khoản con dưới MCC.</div>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          {% else %}
+            <span class="text-white-50 small">MCC chưa cấu hình</span>
+          {% endif %}
+        </div>
+      </div>
+    </nav>
+
+    <main class="container py-4">
+      {% with messages = get_flashed_messages(with_categories=True) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // Simple client-side filter + navigation for MCC account switcher
+      (function () {
+        const searchInput = document.getElementById('accountSearchInput');
+        const listContainer = document.getElementById('accountListContainer');
+        if (!searchInput || !listContainer) return;
+
+        searchInput.addEventListener('input', function () {
+          const term = this.value.toLowerCase();
+          const items = listContainer.querySelectorAll('.account-item');
+          items.forEach(function (btn) {
+            const name = (btn.getAttribute('data-account-name') || '').toLowerCase();
+            const id = (btn.getAttribute('data-account-id') || '').toLowerCase();
+            const text = name + ' ' + id;
+            btn.style.display = text.indexOf(term) !== -1 ? '' : 'none';
+          });
+        });
+
+        listContainer.addEventListener('click', function (e) {
+          const target = e.target.closest('.account-item');
+          if (!target) return;
+          const id = target.getAttribute('data-account-id');
+          if (!id) return;
+          const url = new URL(window.location.href);
+          url.pathname = "{{ url_for('dashboard') }}";
+          url.searchParams.set('customer_id', id);
+          window.location.href = url.toString();
+        });
+      })();
+    </script>
+  </body>
+</html>
