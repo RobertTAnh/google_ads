@@ -223,6 +223,26 @@ def _load_report_projects(path: Path, database_url: Optional[str] = None) -> lis
 
 def _save_report_projects(path: Path, projects: list[dict], database_url: Optional[str] = None) -> None:
     if database_url:
+        def _row(p: dict) -> dict:
+            # Ensure all placeholders exist to avoid KeyError in psycopg execute.
+            return {
+                "id": str(p.get("id", "")),
+                "mcc": str(p.get("mcc", "")),
+                "cid": str(p.get("cid", "")),
+                "sheet_spreadsheet_id": str(p.get("sheet_spreadsheet_id", "")),
+                "sheet_tab_name": str(p.get("sheet_tab_name", "")),
+                "schedule_time": str(p.get("schedule_time", "06:00") or "06:00"),
+                "time_zone": str(p.get("time_zone", "Asia/Ho_Chi_Minh") or "Asia/Ho_Chi_Minh"),
+                "active": bool(p.get("active", True)),
+                "created_at": str(p.get("created_at", "")),
+                "last_run_date": str(p.get("last_run_date", "")),
+                "last_run_at": str(p.get("last_run_at", "")),
+                "last_status": str(p.get("last_status", "")),
+                "last_error": str(p.get("last_error", "")),
+                # psycopg will adapt dict to json/jsonb, None -> NULL
+                "last_result": p.get("last_result", None),
+            }
+
         upsert = """
             INSERT INTO report_projects (
               id, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
@@ -250,7 +270,7 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
         with psycopg.connect(database_url, autocommit=True) as conn:
             with conn.cursor() as cur:
                 for p in projects:
-                    cur.execute(upsert, p)
+                    cur.execute(upsert, _row(p))
                 if ids:
                     cur.execute("DELETE FROM report_projects WHERE id <> ALL(%s)", (ids,))
                 else:
