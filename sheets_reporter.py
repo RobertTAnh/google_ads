@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import re
 from dataclasses import asdict
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from google.oauth2.service_account import Credentials
@@ -133,8 +135,26 @@ def build_sheets_service() -> Any:
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     if not cred_path:
         raise RuntimeError("Thiếu env GOOGLE_APPLICATION_CREDENTIALS (đường dẫn JSON service account).")
+
+    # Railway-friendly: write service account JSON to the path if missing.
+    p = Path(cred_path)
+    if not p.exists():
+        raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
+        raw_text = os.getenv("GOOGLE_SA_JSON")
+        content = ""
+        if raw_b64:
+            try:
+                content = base64.b64decode(raw_b64).decode("utf-8")
+            except Exception as ex:
+                raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
+        elif raw_text:
+            content = raw_text
+        if content:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
+    creds = Credentials.from_service_account_file(str(p), scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
