@@ -3,106 +3,137 @@
 {% block title %}Báo cáo tự động{% endblock %}
 
 {% block content %}
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <div>
-      <h1 class="h3 mb-1">Tab báo cáo tự động</h1>
-      <div class="text-muted">Tạo project để tự động nhập dữ liệu hôm qua vào Google Sheet mỗi ngày.</div>
-    </div>
-  </div>
+  <style>
+    .rp-wrap { color: #e7ebff; }
+    .rp-card {
+      background: linear-gradient(180deg, #121a42 0%, #0d1434 100%);
+      border: 1px solid #202c67;
+      border-radius: 18px;
+      box-shadow: 0 8px 30px rgba(4, 8, 24, 0.45);
+    }
+    .rp-muted { color: #93a1d7; }
+    .rp-title { color: #f1f4ff; font-weight: 700; }
+    .rp-input, .rp-input:focus {
+      background: #0a1130;
+      border-color: #27367a;
+      color: #eef2ff;
+    }
+    .rp-btn-main {
+      background: linear-gradient(90deg, #7d66ff 0%, #9257ff 100%);
+      color: #fff;
+      border: none;
+      font-weight: 600;
+    }
+    .rp-btn-main:hover { color: #fff; opacity: 0.95; }
+    .rp-btn-ghost {
+      background: #121a42;
+      border: 1px solid #27367a;
+      color: #dce3ff;
+    }
+    .rp-btn-ghost:hover { color: #fff; border-color: #3d50ad; }
+    .rp-table {
+      --bs-table-bg: transparent;
+      --bs-table-color: #e7ebff;
+      --bs-table-border-color: #1f2a61;
+    }
+    .rp-table thead th {
+      color: #9ca9db;
+      font-weight: 600;
+      border-bottom-color: #27367a;
+    }
+    .rp-badge-on { color: #30d685; font-weight: 700; }
+    .rp-badge-off { color: #9ca9db; font-weight: 700; }
+  </style>
 
-  <div class="card mb-4">
-    <div class="card-body">
-      <h2 class="h5 mb-3">Tạo lịch báo cáo tự động hàng ngày</h2>
-      <form method="post" action="{{ url_for('create_report_project') }}">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label">MCC</label>
-            <input class="form-control" name="mcc" placeholder="8776919182" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">CID (Customer ID)</label>
-            <input class="form-control" name="cid" placeholder="1883033658" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">SHEET_SPREADSHEET_ID</label>
-            <input class="form-control" name="sheet_spreadsheet_id" placeholder="1U9GTuKuqircioXiuObC8hy4Gs_v8NeQUhe-kuh1DS-M" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">SHEET_TAB_NAME</label>
-            <input class="form-control" name="sheet_tab_name" placeholder="2.2 Report Ads google" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">SCHEDULE_TIME (HH:MM)</label>
-            <input class="form-control" name="schedule_time" value="06:00" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Time_zone</label>
-            <input class="form-control" name="time_zone" value="Asia/Ho_Chi_Minh" required>
-          </div>
-          <div class="col-md-12 form-check mt-1 ms-2">
-            <input class="form-check-input" type="checkbox" value="on" id="activeProject" name="active" checked>
-            <label class="form-check-label" for="activeProject">Kích hoạt ngay sau khi tạo</label>
-          </div>
-          <div class="col-md-12">
-            <button type="submit" class="btn btn-primary">Tạo project báo cáo hàng ngày</button>
-          </div>
+  <div class="rp-wrap">
+    <div class="rp-card p-4 mb-4">
+      <div class="d-flex align-items-start justify-content-between flex-wrap gap-3">
+        <div>
+          <h1 class="h3 mb-1 rp-title">Projects Fanpage</h1>
+          <div class="rp-muted">Tạo & quản lý nhiều project báo cáo tự động.</div>
         </div>
-      </form>
-    </div>
-  </div>
+        <button class="btn rp-btn-main px-4" type="button" data-bs-toggle="collapse" data-bs-target="#createProjectForm">
+          + Tạo Project
+        </button>
+      </div>
 
-  <div class="card">
-    <div class="card-body">
-      <h2 class="h5 mb-3">Danh sách project</h2>
+      <div class="collapse mt-4 show" id="createProjectForm">
+        <form method="post" action="{{ url_for('create_report_project') }}">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label rp-muted mb-1">MCC</label>
+              <input class="form-control rp-input js-customer-id" name="mcc" placeholder="877-691-9182" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label rp-muted mb-1">CID (Customer ID)</label>
+              <input class="form-control rp-input js-customer-id" name="cid" placeholder="188-303-3658" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label rp-muted mb-1">SHEET_SPREADSHEET_ID</label>
+              <input class="form-control rp-input" name="sheet_spreadsheet_id" placeholder="1U9GTuKuqircioXiuObC8hy4Gs_v8NeQUhe-kuh1DS-M" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label rp-muted mb-1">SHEET_TAB_NAME</label>
+              <input class="form-control rp-input" name="sheet_tab_name" placeholder="2.2 Report Ads google" required>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label rp-muted mb-1">SCHEDULE_TIME (HH:MM)</label>
+              <input class="form-control rp-input" name="schedule_time" value="06:00" required>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label rp-muted mb-1">Time_zone</label>
+              <input class="form-control rp-input" name="time_zone" value="Asia/Ho_Chi_Minh" required>
+            </div>
+            <div class="col-md-12 form-check mt-1 ms-2">
+              <input class="form-check-input" type="checkbox" value="on" id="activeProject" name="active" checked>
+              <label class="form-check-label rp-muted" for="activeProject">Active</label>
+            </div>
+            <div class="col-md-12 d-flex gap-2">
+              <button type="submit" class="btn rp-btn-main px-4">Lưu project</button>
+              <button type="button" class="btn rp-btn-ghost" data-bs-toggle="collapse" data-bs-target="#createProjectForm">Ẩn form</button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="rp-card p-4">
+      <h2 class="h5 mb-3 rp-title">Danh sách project</h2>
       <div class="table-responsive">
-        <table class="table table-sm align-middle">
+        <table class="table table-sm align-middle rp-table">
           <thead>
             <tr>
-              <th>MCC</th>
-              <th>CID</th>
+              <th>Tên project</th>
+              <th>Page ID</th>
               <th>Sheet</th>
-              <th>Tab</th>
-              <th>Giờ chạy</th>
+              <th>Schedule</th>
               <th>TZ</th>
               <th>Trạng thái</th>
-              <th>Lần chạy gần nhất</th>
               <th>Hành động</th>
             </tr>
           </thead>
           <tbody>
             {% for p in projects %}
               <tr>
-                <td class="font-monospace">{{ p.mcc }}</td>
-                <td class="font-monospace">{{ p.cid }}</td>
+                <td class="fw-semibold">{{ p.sheet_tab_name }}</td>
+                <td class="font-monospace">{{ p.cid|cidfmt }}</td>
                 <td class="font-monospace small">{{ p.sheet_spreadsheet_id }}</td>
-                <td>{{ p.sheet_tab_name }}</td>
                 <td class="font-monospace">{{ p.schedule_time }}</td>
                 <td class="font-monospace">{{ p.time_zone }}</td>
                 <td>
                   {% if p.active %}
-                    <span class="badge text-bg-success">active</span>
+                    <span class="rp-badge-on">Active</span>
                   {% else %}
-                    <span class="badge text-bg-secondary">paused</span>
-                  {% endif %}
-                  {% if p.last_status == "error" %}
-                    <span class="badge text-bg-danger ms-1">error</span>
-                  {% elif p.last_status == "success" %}
-                    <span class="badge text-bg-primary ms-1">ok</span>
-                  {% endif %}
-                </td>
-                <td class="small">
-                  {{ p.last_run_at or "-" }}
-                  {% if p.last_error %}
-                    <div class="text-danger">{{ p.last_error }}</div>
+                    <span class="rp-badge-off">Paused</span>
                   {% endif %}
                 </td>
                 <td>
-                  <div class="d-flex gap-1">
+                  <div class="d-flex gap-2">
                     <form method="post" action="{{ url_for('run_report_project_now', project_id=p.id) }}">
-                      <button type="submit" class="btn btn-sm btn-outline-primary">Chạy ngay</button>
+                      <button type="submit" class="btn btn-sm rp-btn-ghost">Chạy ngay</button>
                     </form>
                     <form method="post" action="{{ url_for('toggle_report_project', project_id=p.id) }}">
-                      <button type="submit" class="btn btn-sm btn-outline-secondary">
+                      <button type="submit" class="btn btn-sm rp-btn-ghost">
                         {% if p.active %}Tạm dừng{% else %}Kích hoạt{% endif %}
                       </button>
                     </form>
@@ -119,5 +150,21 @@
       </div>
     </div>
   </div>
+  <script>
+  (function () {
+    function toDashedCustomerId(v) {
+      var digits = (v || '').replace(/\D/g, '').slice(0, 10);
+      if (digits.length <= 3) return digits;
+      if (digits.length <= 6) return digits.slice(0, 3) + '-' + digits.slice(3);
+      return digits.slice(0, 3) + '-' + digits.slice(3, 6) + '-' + digits.slice(6);
+    }
+    document.querySelectorAll('.js-customer-id').forEach(function (el) {
+      el.addEventListener('input', function () {
+        this.value = toDashedCustomerId(this.value);
+      });
+      el.value = toDashedCustomerId(el.value);
+    });
+  })();
+</script>
 {% endblock %}
 

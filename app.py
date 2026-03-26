@@ -380,6 +380,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
     app.jinja_env.filters["vnd"] = format_vnd_thousands
+    app.jinja_env.filters["cidfmt"] = _format_customer_id_display
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "1").strip().lower() in (
