@@ -8,21 +8,26 @@
       <div class="card shadow-sm">
         <div class="card-body">
           <h1 class="h5 mb-3">Đăng nhập hệ thống</h1>
-          <form method="post" action="{{ url_for('login', next=next_url) }}">
+          <form method="post" action="{{ url_for('login', next=next_url) }}" autocomplete="off">
             <div class="mb-3">
               <label class="form-label">Tài khoản</label>
               <input
                 type="text"
                 class="form-control"
                 name="username"
-                value="{{ request.form.get('username', login_username) }}"
+                value="{{ request.form.get('username', '') }}"
+                placeholder="Nhập tài khoản"
+                autocomplete="off"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
                 required
                 autofocus
               >
             </div>
             <div class="mb-3">
               <label class="form-label">Mật khẩu</label>
-              <input type="password" class="form-control" name="password" required>
+              <input type="password" class="form-control" name="password" autocomplete="new-password" required>
             </div>
             <button type="submit" class="btn btn-primary w-100">Đăng nhập</button>
           </form>

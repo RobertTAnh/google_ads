@@ -239,7 +239,7 @@ def create_app() -> Flask:
                 return redirect(next_url)
             flash("Sai tài khoản hoặc mật khẩu.", "danger")
 
-        return render_template("login.html", next_url=next_url, login_username=admin_username)
+        return render_template("login.html", next_url=next_url)
 
     @app.post("/logout")
     def logout():
