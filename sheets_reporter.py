@@ -234,7 +234,42 @@ def build_sheets_service() -> Any:
                 "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
                 f"Parse error: {ex}"
             ) from ex
-        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        # Normalize private_key if it looks like it contains literal "\\n" instead of real newlines.
+        # (Do not log the key; only log lengths/flags.)
+        pk = info.get("private_key")
+        if isinstance(pk, str):
+            pk_s = pk.strip().strip('"').strip("'")
+            has_begin = "BEGIN PRIVATE KEY" in pk_s or "BEGIN RSA PRIVATE KEY" in pk_s
+            has_end = "END PRIVATE KEY" in pk_s or "END RSA PRIVATE KEY" in pk_s
+            has_real_nl = "\n" in pk_s
+            has_literal_slash_n = "\\n" in pk_s
+            if has_begin and has_end and (not has_real_nl) and has_literal_slash_n:
+                info["private_key"] = pk_s.replace("\\n", "\n")
+            else:
+                info["private_key"] = pk_s
+
+        try:
+            creds = Credentials.from_service_account_info(info, scopes=scopes)
+        except Exception as ex:
+            pk2 = info.get("private_key")
+            pk2s = pk2 if isinstance(pk2, str) else ""
+            has_begin2 = "BEGIN PRIVATE KEY" in pk2s or "BEGIN RSA PRIVATE KEY" in pk2s
+            has_end2 = "END PRIVATE KEY" in pk2s or "END RSA PRIVATE KEY" in pk2s
+            dbg = {
+                "b64": bool(raw_b64),
+                "raw": bool(raw_text),
+                "clen": len(content),
+                "pk_len": len(pk2s),
+                "pk_has_begin": bool(has_begin2),
+                "pk_has_end": bool(has_end2),
+                "pk_has_real_newlines": ("\n" in pk2s),
+                "pk_has_literal_slash_n": ("\\n" in pk2s),
+            }
+            raise RuntimeError(
+                "Unable to load service account private_key PEM. "
+                f"dbg={dbg} err={ex}"
+            ) from ex
+
         return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
