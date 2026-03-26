@@ -144,7 +144,12 @@ def build_sheets_service() -> Any:
         content = ""
         if raw_b64:
             try:
-                content = base64.b64decode(raw_b64).decode("utf-8")
+                # Normalize: remove whitespace/newlines and auto-fix missing '=' padding.
+                b64 = "".join(raw_b64.split())
+                missing = (-len(b64)) % 4
+                if missing:
+                    b64 = b64 + ("=" * missing)
+                content = base64.b64decode(b64).decode("utf-8")
             except Exception as ex:
                 raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
         elif raw_text:
