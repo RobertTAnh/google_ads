@@ -149,6 +149,33 @@ def _init_report_projects_table(database_url: str) -> None:
             cur.execute(ddl)
 
 
+def _db_report_projects_count(database_url: str) -> int:
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM report_projects")
+            return int(cur.fetchone()[0] or 0)
+
+
+def _migrate_report_projects_file_to_db(path: Path, database_url: str) -> int:
+    """
+    One-time best-effort migration:
+    - If DB is empty but `report_projects.json` has items, upsert them into DB.
+    """
+    try:
+        if _db_report_projects_count(database_url) > 0:
+            return 0
+    except Exception:
+        return 0
+
+    file_items = _load_report_projects(path, database_url=None)
+    if not file_items:
+        return 0
+    try:
+        _save_report_projects(path, file_items, database_url=database_url)
+        return len(file_items)
+    except Exception:
+        return 0
+
 def _load_report_projects(path: Path, database_url: Optional[str] = None) -> list[dict]:
     if database_url:
         query = """
@@ -396,6 +423,7 @@ def create_app() -> Flask:
     if database_url:
         try:
             _init_report_projects_table(database_url)
+            _migrate_report_projects_file_to_db(report_projects_file, database_url)
         except Exception as ex:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
     _maybe_start_report_scheduler(report_projects_file, database_url or None)
