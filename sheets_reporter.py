@@ -131,48 +131,48 @@ def _sum_rows_for_campaign(rows: List[CampaignPerformanceRow], campaign_name: st
 def build_sheets_service() -> Any:
     """
     Auth bằng Service Account.
-    Yêu cầu env GOOGLE_APPLICATION_CREDENTIALS trỏ tới file JSON service account.
+    Railway-friendly:
+    - Ưu tiên đọc JSON từ env `GOOGLE_SA_JSON_B64` / `GOOGLE_SA_JSON` (không cần file).
+    - Fallback: đọc từ file theo env `GOOGLE_APPLICATION_CREDENTIALS`.
     """
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if not cred_path:
-        raise RuntimeError("Thiếu env GOOGLE_APPLICATION_CREDENTIALS (đường dẫn JSON service account).")
-
-    # Railway-friendly: write service account JSON to the path if missing.
-    p = Path(cred_path)
-    if not p.exists():
-        raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
-        raw_text = os.getenv("GOOGLE_SA_JSON")
-        content = ""
-        if raw_b64:
-            try:
-                # Normalize: remove whitespace/newlines and auto-fix missing '=' padding.
-                b64 = "".join(raw_b64.split())
-                missing = (-len(b64)) % 4
-                if missing:
-                    b64 = b64 + ("=" * missing)
-                content = base64.b64decode(b64).decode("utf-8")
-            except Exception as ex:
-                raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
-        elif raw_text:
-            content = raw_text.strip()
-            # Common copy/paste issue: env value wrapped in quotes.
-            if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
-                content = content[1:-1]
-        if content:
-            # Validate JSON early to surface a clear error message.
-            try:
-                json.loads(content)
-            except Exception as ex:
-                raise RuntimeError(
-                    "Service account JSON is invalid. "
-                    "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
-                    f"Parse error: {ex}"
-                ) from ex
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
+    raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
+    raw_text = os.getenv("GOOGLE_SA_JSON")
+    content = ""
+    if raw_b64:
+        try:
+            # Normalize: remove whitespace/newlines and auto-fix missing '=' padding.
+            b64 = "".join(raw_b64.split())
+            missing = (-len(b64)) % 4
+            if missing:
+                b64 = b64 + ("=" * missing)
+            content = base64.b64decode(b64).decode("utf-8")
+        except Exception as ex:
+            raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
+    elif raw_text:
+        content = raw_text.strip()
+        if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
+            content = content[1:-1]
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(str(p), scopes=scopes)
+    if content:
+        try:
+            info = json.loads(content)
+        except Exception as ex:
+            raise RuntimeError(
+                "Service account JSON is invalid. "
+                "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
+                f"Parse error: {ex}"
+            ) from ex
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if not cred_path:
+        raise RuntimeError(
+            "Thiếu credential Google Sheets. "
+            "Set GOOGLE_SA_JSON_B64 (khuyên dùng) hoặc GOOGLE_APPLICATION_CREDENTIALS."
+        )
+    creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
