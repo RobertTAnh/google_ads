@@ -16,6 +16,7 @@ from dataclasses import asdict
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash
+import psycopg
 
 from google_ads_helper import (
     GoogleAdsHelperError,
@@ -117,7 +118,71 @@ def _report_projects_path(project_root: Path) -> Path:
     return project_root / "report_projects.json"
 
 
-def _load_report_projects(path: Path) -> list[dict]:
+def _normalize_database_url(url: str) -> str:
+    # Railway may expose postgres://, psycopg expects postgresql://
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://") :]
+    return url
+
+
+def _init_report_projects_table(database_url: str) -> None:
+    ddl = """
+    CREATE TABLE IF NOT EXISTS report_projects (
+      id TEXT PRIMARY KEY,
+      mcc TEXT NOT NULL,
+      cid TEXT NOT NULL,
+      sheet_spreadsheet_id TEXT NOT NULL,
+      sheet_tab_name TEXT NOT NULL,
+      schedule_time TEXT NOT NULL,
+      time_zone TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL,
+      last_run_date TEXT NOT NULL DEFAULT '',
+      last_run_at TEXT NOT NULL DEFAULT '',
+      last_status TEXT NOT NULL DEFAULT '',
+      last_error TEXT NOT NULL DEFAULT '',
+      last_result JSONB
+    );
+    """
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+
+
+def _load_report_projects(path: Path, database_url: Optional[str] = None) -> list[dict]:
+    if database_url:
+        query = """
+            SELECT
+              id, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
+              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
+            FROM report_projects
+            ORDER BY created_at DESC
+        """
+        out: list[dict] = []
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                for row in cur.fetchall():
+                    out.append(
+                        {
+                            "id": row[0],
+                            "mcc": row[1],
+                            "cid": row[2],
+                            "sheet_spreadsheet_id": row[3],
+                            "sheet_tab_name": row[4],
+                            "schedule_time": row[5],
+                            "time_zone": row[6],
+                            "active": bool(row[7]),
+                            "created_at": row[8],
+                            "last_run_date": row[9] or "",
+                            "last_run_at": row[10] or "",
+                            "last_status": row[11] or "",
+                            "last_error": row[12] or "",
+                            "last_result": row[13] if isinstance(row[13], dict) else {},
+                        }
+                    )
+        return out
+
     if not path.exists():
         return []
     try:
@@ -129,7 +194,42 @@ def _load_report_projects(path: Path) -> list[dict]:
     return [x for x in raw if isinstance(x, dict)]
 
 
-def _save_report_projects(path: Path, projects: list[dict]) -> None:
+def _save_report_projects(path: Path, projects: list[dict], database_url: Optional[str] = None) -> None:
+    if database_url:
+        upsert = """
+            INSERT INTO report_projects (
+              id, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
+              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
+            ) VALUES (
+              %(id)s, %(mcc)s, %(cid)s, %(sheet_spreadsheet_id)s, %(sheet_tab_name)s, %(schedule_time)s, %(time_zone)s,
+              %(active)s, %(created_at)s, %(last_run_date)s, %(last_run_at)s, %(last_status)s, %(last_error)s, %(last_result)s
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              mcc = EXCLUDED.mcc,
+              cid = EXCLUDED.cid,
+              sheet_spreadsheet_id = EXCLUDED.sheet_spreadsheet_id,
+              sheet_tab_name = EXCLUDED.sheet_tab_name,
+              schedule_time = EXCLUDED.schedule_time,
+              time_zone = EXCLUDED.time_zone,
+              active = EXCLUDED.active,
+              created_at = EXCLUDED.created_at,
+              last_run_date = EXCLUDED.last_run_date,
+              last_run_at = EXCLUDED.last_run_at,
+              last_status = EXCLUDED.last_status,
+              last_error = EXCLUDED.last_error,
+              last_result = EXCLUDED.last_result
+        """
+        ids = [str(p.get("id", "")) for p in projects if str(p.get("id", ""))]
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                for p in projects:
+                    cur.execute(upsert, p)
+                if ids:
+                    cur.execute("DELETE FROM report_projects WHERE id <> ALL(%s)", (ids,))
+                else:
+                    cur.execute("DELETE FROM report_projects")
+        return
+
     path.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -140,7 +240,54 @@ def _safe_tz(tz_name: str) -> ZoneInfo:
         return ZoneInfo("Asia/Ho_Chi_Minh")
 
 
-def _maybe_start_report_scheduler(path: Path) -> None:
+def _stable_spread_offset_minutes(project_id: str, window_minutes: int) -> int:
+    if window_minutes <= 0:
+        return 0
+    # Deterministic small spread by project id.
+    seed = sum(project_id.encode("utf-8"))
+    return seed % (window_minutes + 1)
+
+
+def _effective_schedule_time(project: dict, *, default_schedule: str = "06:00") -> str:
+    """
+    Stagger jobs around base time to avoid thundering herd at exactly 06:00.
+    Applies spread only when base time is 06:00.
+    """
+    base = str(project.get("schedule_time", default_schedule) or default_schedule).strip()
+    if not re.match(r"^\d{2}:\d{2}$", base):
+        base = default_schedule
+    hh, mm = [int(x) for x in base.split(":")]
+    total = hh * 60 + mm
+
+    spread_enabled = str(os.getenv("REPORT_ENABLE_SPREAD", "1")).strip().lower() in ("1", "true", "yes")
+    spread_window = int((os.getenv("REPORT_SPREAD_WINDOW_MINUTES") or "40").strip() or 40)
+    if spread_enabled and base == "06:00" and spread_window > 0:
+        total += _stable_spread_offset_minutes(str(project.get("id", "")), spread_window)
+
+    total %= 24 * 60
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _acquire_scheduler_leader(database_url: str) -> Optional[psycopg.Connection]:
+    """
+    Acquire cross-instance scheduler lock in Postgres.
+    Returns a live connection that HOLDS the advisory lock.
+    """
+    conn = psycopg.connect(database_url, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (8104202601,))
+            ok = bool(cur.fetchone()[0])
+        if ok:
+            return conn
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
+
+
+def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> None:
     global _REPORT_SCHEDULER_STARTED
     with _REPORT_SCHEDULER_START_LOCK:
         if _REPORT_SCHEDULER_STARTED:
@@ -148,27 +295,42 @@ def _maybe_start_report_scheduler(path: Path) -> None:
         _REPORT_SCHEDULER_STARTED = True
 
     def _runner() -> None:
+        throttle_seconds = int((os.getenv("REPORT_JOB_THROTTLE_SECONDS") or "8").strip() or 8)
         while True:
+            leader_conn: Optional[psycopg.Connection] = None
             try:
+                # In production (Railway), only ONE instance should process schedules.
+                if database_url:
+                    leader_conn = _acquire_scheduler_leader(database_url)
+                    if leader_conn is None:
+                        time.sleep(10)
+                        continue
+
                 with _REPORT_PROJECTS_LOCK:
-                    projects = _load_report_projects(path)
+                    projects = _load_report_projects(path, database_url)
 
                 now_utc = datetime.utcnow().replace(tzinfo=ZoneInfo("UTC"))
-                changed = False
+                due_queue: list[tuple[datetime, dict, str, str]] = []
                 for p in projects:
                     if not p.get("active", True):
                         continue
-                    sched = str(p.get("schedule_time", "06:00"))
                     tz_name = str(p.get("time_zone", "Asia/Ho_Chi_Minh"))
                     tz = _safe_tz(tz_name)
                     now_local = now_utc.astimezone(tz)
-                    hhmm = f"{now_local.hour:02d}:{now_local.minute:02d}"
                     today_local = now_local.date().isoformat()
-                    if hhmm < sched:
-                        continue
                     if str(p.get("last_run_date", "")) == today_local:
                         continue
+                    effective_sched = _effective_schedule_time(p, default_schedule="06:00")
+                    if not re.match(r"^\d{2}:\d{2}$", effective_sched):
+                        continue
+                    hh, mm = [int(x) for x in effective_sched.split(":")]
+                    due_at = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if now_local >= due_at:
+                        due_queue.append((due_at, p, today_local, effective_sched))
 
+                due_queue.sort(key=lambda x: x[0])
+                changed = False
+                for _, p, today_local, effective_sched in due_queue:
                     try:
                         result = push_yesterday_report_to_sheet(
                             spreadsheet_id=str(p.get("sheet_spreadsheet_id", "")),
@@ -183,17 +345,30 @@ def _maybe_start_report_scheduler(path: Path) -> None:
                         p["last_result"] = result
                     except Exception as ex:
                         p["last_status"] = "error"
-                        p["last_error"] = str(ex)
+                        p["last_error"] = f"{effective_sched} | {ex}"
                     p["last_run_date"] = today_local
                     p["last_run_at"] = datetime.utcnow().isoformat() + "Z"
                     changed = True
+                    if throttle_seconds > 0:
+                        time.sleep(throttle_seconds)
 
                 if changed:
                     with _REPORT_PROJECTS_LOCK:
-                        _save_report_projects(path, projects)
+                        _save_report_projects(path, projects, database_url)
             except Exception:
                 # Keep scheduler alive regardless of one-loop errors.
                 pass
+            finally:
+                if leader_conn is not None:
+                    try:
+                        with leader_conn.cursor() as cur:
+                            cur.execute("SELECT pg_advisory_unlock(%s)", (8104202601,))
+                    except Exception:
+                        pass
+                    try:
+                        leader_conn.close()
+                    except Exception:
+                        pass
 
             time.sleep(30)
 
@@ -216,7 +391,13 @@ def create_app() -> Flask:
     project_root = Path(__file__).resolve().parent
     google_ads_yaml = _maybe_bootstrap_google_ads_yaml(project_root)
     report_projects_file = _report_projects_path(project_root)
-    _maybe_start_report_scheduler(report_projects_file)
+    database_url = _normalize_database_url((os.getenv("DATABASE_URL") or "").strip())
+    if database_url:
+        try:
+            _init_report_projects_table(database_url)
+        except Exception as ex:
+            raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
+    _maybe_start_report_scheduler(report_projects_file, database_url or None)
 
     # Your MCC ID should live in google-ads.yaml as `login_customer_id`.
     # If you want to hard-enforce it from environment, set GOOGLE_ADS_LOGIN_CUSTOMER_ID.
@@ -473,7 +654,7 @@ def create_app() -> Flask:
     @app.get("/report-projects")
     def report_projects():
         with _REPORT_PROJECTS_LOCK:
-            projects = _load_report_projects(report_projects_file)
+            projects = _load_report_projects(report_projects_file, database_url or None)
         projects.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         return render_template("report_projects.html", projects=projects)
 
@@ -510,28 +691,28 @@ def create_app() -> Flask:
             "last_error": "",
         }
         with _REPORT_PROJECTS_LOCK:
-            projects = _load_report_projects(report_projects_file)
+            projects = _load_report_projects(report_projects_file, database_url or None)
             projects.append(item)
-            _save_report_projects(report_projects_file, projects)
+            _save_report_projects(report_projects_file, projects, database_url or None)
         flash("Đã tạo project báo cáo tự động.", "success")
         return redirect(url_for("report_projects"))
 
     @app.post("/report-projects/<project_id>/toggle")
     def toggle_report_project(project_id: str):
         with _REPORT_PROJECTS_LOCK:
-            projects = _load_report_projects(report_projects_file)
+            projects = _load_report_projects(report_projects_file, database_url or None)
             for p in projects:
                 if p.get("id") == project_id:
                     p["active"] = not bool(p.get("active", True))
                     break
-            _save_report_projects(report_projects_file, projects)
+            _save_report_projects(report_projects_file, projects, database_url or None)
         flash("Đã cập nhật trạng thái project.", "info")
         return redirect(url_for("report_projects"))
 
     @app.post("/report-projects/<project_id>/run-now")
     def run_report_project_now(project_id: str):
         with _REPORT_PROJECTS_LOCK:
-            projects = _load_report_projects(report_projects_file)
+            projects = _load_report_projects(report_projects_file, database_url or None)
             target = next((p for p in projects if p.get("id") == project_id), None)
         if not target:
             flash("Không tìm thấy project.", "warning")
@@ -556,12 +737,12 @@ def create_app() -> Flask:
         target["last_run_date"] = datetime.utcnow().date().isoformat()
         target["last_run_at"] = datetime.utcnow().isoformat() + "Z"
         with _REPORT_PROJECTS_LOCK:
-            projects = _load_report_projects(report_projects_file)
+            projects = _load_report_projects(report_projects_file, database_url or None)
             for idx, p in enumerate(projects):
                 if p.get("id") == project_id:
                     projects[idx] = target
                     break
-            _save_report_projects(report_projects_file, projects)
+            _save_report_projects(report_projects_file, projects, database_url or None)
         return redirect(url_for("report_projects"))
 
     @app.post("/dashboard/push-sheet")
