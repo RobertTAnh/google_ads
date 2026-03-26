@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 from datetime import date, timedelta
@@ -76,6 +77,31 @@ def _read_login_customer_id_from_yaml(yaml_path: str) -> str:
         return ""
     return ""
 
+def _maybe_bootstrap_google_ads_yaml(project_root: Path) -> str:
+    """
+    Railway-friendly bootstrap:
+    - ưu tiên file local `google-ads.yaml` nếu đã tồn tại
+    - hoặc tạo file từ env `GOOGLE_ADS_YAML_B64` / `GOOGLE_ADS_YAML_TEXT`
+    """
+    yaml_path = project_root / "google-ads.yaml"
+    if yaml_path.exists():
+        return str(yaml_path)
+
+    raw_b64 = (os.getenv("GOOGLE_ADS_YAML_B64") or "").strip()
+    raw_text = os.getenv("GOOGLE_ADS_YAML_TEXT")
+    content = ""
+    if raw_b64:
+        try:
+            content = base64.b64decode(raw_b64).decode("utf-8")
+        except Exception as ex:
+            raise RuntimeError(f"Invalid GOOGLE_ADS_YAML_B64: {ex}") from ex
+    elif raw_text:
+        content = raw_text
+
+    if content:
+        yaml_path.write_text(content, encoding="utf-8")
+    return str(yaml_path)
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -83,7 +109,7 @@ def create_app() -> Flask:
     app.jinja_env.filters["vnd"] = format_vnd_thousands
 
     project_root = Path(__file__).resolve().parent
-    google_ads_yaml = str(project_root / "google-ads.yaml")
+    google_ads_yaml = _maybe_bootstrap_google_ads_yaml(project_root)
 
     # Your MCC ID should live in google-ads.yaml as `login_customer_id`.
     # If you want to hard-enforce it from environment, set GOOGLE_ADS_LOGIN_CUSTOMER_ID.
@@ -153,6 +179,10 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         return redirect(url_for("dashboard"))
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"ok": True}), 200
 
     @app.get("/api/mcc-accounts")
     def api_mcc_accounts():
@@ -368,5 +398,9 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        debug=os.getenv("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes"),
+    )
 
