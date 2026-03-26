@@ -17,6 +17,7 @@ from dataclasses import asdict
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash
 import psycopg
+from psycopg.types.json import Jsonb
 
 from google_ads_helper import (
     GoogleAdsHelperError,
@@ -239,8 +240,10 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
                 "last_run_at": str(p.get("last_run_at", "")),
                 "last_status": str(p.get("last_status", "")),
                 "last_error": str(p.get("last_error", "")),
-                # psycopg will adapt dict to json/jsonb, None -> NULL
-                "last_result": p.get("last_result", None),
+                # psycopg needs Json/Jsonb wrapper for dict/list
+                "last_result": (
+                    Jsonb(p.get("last_result")) if isinstance(p.get("last_result"), (dict, list)) else None
+                ),
             }
 
         upsert = """
