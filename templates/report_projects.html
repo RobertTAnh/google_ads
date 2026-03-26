@@ -44,6 +44,19 @@
     }
     .rp-badge-on { color: #30d685; font-weight: 700; }
     .rp-badge-off { color: #9ca9db; font-weight: 700; }
+    .rp-log-box {
+      background: #0a1130;
+      border: 1px solid #27367a;
+      border-radius: 12px;
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .rp-log-success { color: #26f28b; }
+    .rp-log-error { color: #ff8e8e; }
+    .rp-log-muted { color: #9ca9db; }
   </style>
 
   <div class="rp-wrap">
@@ -244,24 +257,8 @@
         <div class="modal-body">
           <div class="small rp-muted mb-2">Tên project</div>
           <div class="fw-semibold mb-3" id="resultProjectName">-</div>
-
-          <div class="row g-3 mb-2">
-            <div class="col-md-4">
-              <div class="small rp-muted">Trạng thái</div>
-              <div id="resultStatus">-</div>
-            </div>
-            <div class="col-md-4">
-              <div class="small rp-muted">Lần chạy gần nhất</div>
-              <div id="resultRunAt">-</div>
-            </div>
-            <div class="col-md-4">
-              <div class="small rp-muted">Ngày đã ghi</div>
-              <div id="resultRunDate">-</div>
-            </div>
-          </div>
-
-          <div class="small rp-muted mb-2">Chi tiết</div>
-          <pre class="p-3 rounded" style="background:#0a1130;border:1px solid #27367a;color:#e7ebff;max-height:320px;overflow:auto" id="resultDetail">-</pre>
+          <div class="small rp-muted mb-2">Nhật ký gần nhất</div>
+          <div class="rp-log-box" id="resultSimpleLog">-</div>
         </div>
         <div class="modal-footer border-0">
           <button type="button" class="btn rp-btn-ghost" data-bs-dismiss="modal">Đóng</button>
@@ -320,14 +317,26 @@
       btn.addEventListener('click', function () {
         var p = parseProjectPayload(this);
         document.getElementById('resultProjectName').textContent = p.project_name || p.sheet_tab_name || '-';
-        document.getElementById('resultStatus').textContent = p.last_status || '-';
-        document.getElementById('resultRunAt').textContent = p.last_run_at || '-';
-        document.getElementById('resultRunDate').textContent = p.last_run_date || '-';
-        var detail = {
-          last_result: p.last_result || {},
-          last_error: p.last_error || ''
-        };
-        document.getElementById('resultDetail').textContent = JSON.stringify(detail, null, 2);
+        var status = (p.last_status || '').toLowerCase();
+        var runAt = p.last_run_at || '-';
+        var runDate = p.last_run_date || '-';
+        var result = p.last_result || {};
+        var cells = result.cells || 0;
+        var date = result.date || runDate;
+        var box = document.getElementById('resultSimpleLog');
+        var line = '';
+
+        if (status === 'success') {
+          line = runAt + ' [INFO] [sheet] ✅ NHẬP SHEET THÀNH CÔNG | ngày: ' + date + ' | ô cập nhật: ' + cells;
+          box.className = 'rp-log-box rp-log-success';
+        } else if (status === 'error') {
+          line = runAt + ' [ERROR] [sheet] ❌ NHẬP SHEET THẤT BẠI | ' + (p.last_error || 'Không có chi tiết lỗi');
+          box.className = 'rp-log-box rp-log-error';
+        } else {
+          line = 'Chưa có dữ liệu chạy cho project này.';
+          box.className = 'rp-log-box rp-log-muted';
+        }
+        box.textContent = line;
       });
     });
   })();
