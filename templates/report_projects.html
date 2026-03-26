@@ -1,0 +1,123 @@
+{% extends "layout.html" %}
+
+{% block title %}Báo cáo tự động{% endblock %}
+
+{% block content %}
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+      <h1 class="h3 mb-1">Tab báo cáo tự động</h1>
+      <div class="text-muted">Tạo project để tự động nhập dữ liệu hôm qua vào Google Sheet mỗi ngày.</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-body">
+      <h2 class="h5 mb-3">Tạo lịch báo cáo tự động hàng ngày</h2>
+      <form method="post" action="{{ url_for('create_report_project') }}">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label">MCC</label>
+            <input class="form-control" name="mcc" placeholder="8776919182" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">CID (Customer ID)</label>
+            <input class="form-control" name="cid" placeholder="1883033658" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">SHEET_SPREADSHEET_ID</label>
+            <input class="form-control" name="sheet_spreadsheet_id" placeholder="1U9GTuKuqircioXiuObC8hy4Gs_v8NeQUhe-kuh1DS-M" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">SHEET_TAB_NAME</label>
+            <input class="form-control" name="sheet_tab_name" placeholder="2.2 Report Ads google" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">SCHEDULE_TIME (HH:MM)</label>
+            <input class="form-control" name="schedule_time" value="06:00" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Time_zone</label>
+            <input class="form-control" name="time_zone" value="Asia/Ho_Chi_Minh" required>
+          </div>
+          <div class="col-md-12 form-check mt-1 ms-2">
+            <input class="form-check-input" type="checkbox" value="on" id="activeProject" name="active" checked>
+            <label class="form-check-label" for="activeProject">Kích hoạt ngay sau khi tạo</label>
+          </div>
+          <div class="col-md-12">
+            <button type="submit" class="btn btn-primary">Tạo project báo cáo hàng ngày</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h2 class="h5 mb-3">Danh sách project</h2>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>MCC</th>
+              <th>CID</th>
+              <th>Sheet</th>
+              <th>Tab</th>
+              <th>Giờ chạy</th>
+              <th>TZ</th>
+              <th>Trạng thái</th>
+              <th>Lần chạy gần nhất</th>
+              <th>Hành động</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in projects %}
+              <tr>
+                <td class="font-monospace">{{ p.mcc }}</td>
+                <td class="font-monospace">{{ p.cid }}</td>
+                <td class="font-monospace small">{{ p.sheet_spreadsheet_id }}</td>
+                <td>{{ p.sheet_tab_name }}</td>
+                <td class="font-monospace">{{ p.schedule_time }}</td>
+                <td class="font-monospace">{{ p.time_zone }}</td>
+                <td>
+                  {% if p.active %}
+                    <span class="badge text-bg-success">active</span>
+                  {% else %}
+                    <span class="badge text-bg-secondary">paused</span>
+                  {% endif %}
+                  {% if p.last_status == "error" %}
+                    <span class="badge text-bg-danger ms-1">error</span>
+                  {% elif p.last_status == "success" %}
+                    <span class="badge text-bg-primary ms-1">ok</span>
+                  {% endif %}
+                </td>
+                <td class="small">
+                  {{ p.last_run_at or "-" }}
+                  {% if p.last_error %}
+                    <div class="text-danger">{{ p.last_error }}</div>
+                  {% endif %}
+                </td>
+                <td>
+                  <div class="d-flex gap-1">
+                    <form method="post" action="{{ url_for('run_report_project_now', project_id=p.id) }}">
+                      <button type="submit" class="btn btn-sm btn-outline-primary">Chạy ngay</button>
+                    </form>
+                    <form method="post" action="{{ url_for('toggle_report_project', project_id=p.id) }}">
+                      <button type="submit" class="btn btn-sm btn-outline-secondary">
+                        {% if p.active %}Tạm dừng{% else %}Kích hoạt{% endif %}
+                      </button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="9" class="text-center text-muted py-3">Chưa có project nào.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
-from datetime import date, timedelta
+import threading
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dataclasses import asdict
 
@@ -25,6 +30,9 @@ from google_ads_helper import (
 from sheets_reporter import push_yesterday_report_to_sheet
 
 _ACCOUNT_CACHE: dict = {"ts": 0.0, "mcc_id": "", "mcc_name": "", "children": []}
+_REPORT_PROJECTS_LOCK = threading.Lock()
+_REPORT_SCHEDULER_STARTED = False
+_REPORT_SCHEDULER_START_LOCK = threading.Lock()
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -105,6 +113,94 @@ def _maybe_bootstrap_google_ads_yaml(project_root: Path) -> str:
     return str(yaml_path)
 
 
+def _report_projects_path(project_root: Path) -> Path:
+    return project_root / "report_projects.json"
+
+
+def _load_report_projects(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, dict)]
+
+
+def _save_report_projects(path: Path, projects: list[dict]) -> None:
+    path.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _safe_tz(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def _maybe_start_report_scheduler(path: Path) -> None:
+    global _REPORT_SCHEDULER_STARTED
+    with _REPORT_SCHEDULER_START_LOCK:
+        if _REPORT_SCHEDULER_STARTED:
+            return
+        _REPORT_SCHEDULER_STARTED = True
+
+    def _runner() -> None:
+        while True:
+            try:
+                with _REPORT_PROJECTS_LOCK:
+                    projects = _load_report_projects(path)
+
+                now_utc = datetime.utcnow().replace(tzinfo=ZoneInfo("UTC"))
+                changed = False
+                for p in projects:
+                    if not p.get("active", True):
+                        continue
+                    sched = str(p.get("schedule_time", "06:00"))
+                    tz_name = str(p.get("time_zone", "Asia/Ho_Chi_Minh"))
+                    tz = _safe_tz(tz_name)
+                    now_local = now_utc.astimezone(tz)
+                    hhmm = f"{now_local.hour:02d}:{now_local.minute:02d}"
+                    today_local = now_local.date().isoformat()
+                    if hhmm < sched:
+                        continue
+                    if str(p.get("last_run_date", "")) == today_local:
+                        continue
+
+                    try:
+                        result = push_yesterday_report_to_sheet(
+                            spreadsheet_id=str(p.get("sheet_spreadsheet_id", "")),
+                            sheet_name=str(p.get("sheet_tab_name", "")),
+                            customer_id=str(p.get("cid", "")),
+                            sections=None,
+                            scan_range="A1:CF60",
+                            login_customer_id=str(p.get("mcc", "")).strip() or None,
+                        )
+                        p["last_status"] = "success"
+                        p["last_error"] = ""
+                        p["last_result"] = result
+                    except Exception as ex:
+                        p["last_status"] = "error"
+                        p["last_error"] = str(ex)
+                    p["last_run_date"] = today_local
+                    p["last_run_at"] = datetime.utcnow().isoformat() + "Z"
+                    changed = True
+
+                if changed:
+                    with _REPORT_PROJECTS_LOCK:
+                        _save_report_projects(path, projects)
+            except Exception:
+                # Keep scheduler alive regardless of one-loop errors.
+                pass
+
+            time.sleep(30)
+
+    th = threading.Thread(target=_runner, daemon=True, name="report-scheduler")
+    th.start()
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
@@ -119,6 +215,8 @@ def create_app() -> Flask:
 
     project_root = Path(__file__).resolve().parent
     google_ads_yaml = _maybe_bootstrap_google_ads_yaml(project_root)
+    report_projects_file = _report_projects_path(project_root)
+    _maybe_start_report_scheduler(report_projects_file)
 
     # Your MCC ID should live in google-ads.yaml as `login_customer_id`.
     # If you want to hard-enforce it from environment, set GOOGLE_ADS_LOGIN_CUSTOMER_ID.
@@ -371,6 +469,100 @@ def create_app() -> Flask:
             sheet_push_enabled=bool(sheet_spreadsheet_id),
             sheet_tab_name=sheet_tab_name,
         )
+
+    @app.get("/report-projects")
+    def report_projects():
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file)
+        projects.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return render_template("report_projects.html", projects=projects)
+
+    @app.post("/report-projects")
+    def create_report_project():
+        mcc = _normalize_customer_id(request.form.get("mcc", ""))
+        cid = _normalize_customer_id(request.form.get("cid", ""))
+        spreadsheet_id = (request.form.get("sheet_spreadsheet_id") or "").strip()
+        tab_name = (request.form.get("sheet_tab_name") or "").strip()
+        schedule_time = (request.form.get("schedule_time") or "06:00").strip()
+        time_zone = (request.form.get("time_zone") or "Asia/Ho_Chi_Minh").strip()
+        active = (request.form.get("active") or "on").strip().lower() in ("1", "true", "yes", "on")
+
+        if not (mcc and cid and spreadsheet_id and tab_name):
+            flash("Thiếu thông tin bắt buộc (MCC, CID, Spreadsheet ID, Sheet tab).", "warning")
+            return redirect(url_for("report_projects"))
+        if not re.match(r"^\d{2}:\d{2}$", schedule_time):
+            flash("SCHEDULE_TIME không hợp lệ. Dùng định dạng HH:MM, ví dụ 06:00.", "warning")
+            return redirect(url_for("report_projects"))
+
+        item = {
+            "id": str(uuid4()),
+            "mcc": mcc,
+            "cid": cid,
+            "sheet_spreadsheet_id": spreadsheet_id,
+            "sheet_tab_name": tab_name,
+            "schedule_time": schedule_time,
+            "time_zone": time_zone or "Asia/Ho_Chi_Minh",
+            "active": active,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "last_run_date": "",
+            "last_run_at": "",
+            "last_status": "",
+            "last_error": "",
+        }
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file)
+            projects.append(item)
+            _save_report_projects(report_projects_file, projects)
+        flash("Đã tạo project báo cáo tự động.", "success")
+        return redirect(url_for("report_projects"))
+
+    @app.post("/report-projects/<project_id>/toggle")
+    def toggle_report_project(project_id: str):
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file)
+            for p in projects:
+                if p.get("id") == project_id:
+                    p["active"] = not bool(p.get("active", True))
+                    break
+            _save_report_projects(report_projects_file, projects)
+        flash("Đã cập nhật trạng thái project.", "info")
+        return redirect(url_for("report_projects"))
+
+    @app.post("/report-projects/<project_id>/run-now")
+    def run_report_project_now(project_id: str):
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file)
+            target = next((p for p in projects if p.get("id") == project_id), None)
+        if not target:
+            flash("Không tìm thấy project.", "warning")
+            return redirect(url_for("report_projects"))
+        try:
+            result = push_yesterday_report_to_sheet(
+                spreadsheet_id=str(target.get("sheet_spreadsheet_id", "")),
+                sheet_name=str(target.get("sheet_tab_name", "")),
+                customer_id=str(target.get("cid", "")),
+                sections=None,
+                scan_range="A1:CF60",
+                login_customer_id=str(target.get("mcc", "")).strip() or None,
+            )
+            target["last_status"] = "success"
+            target["last_error"] = ""
+            target["last_result"] = result
+            flash("Đã chạy nhập sheet thủ công thành công.", "success")
+        except Exception as ex:
+            target["last_status"] = "error"
+            target["last_error"] = str(ex)
+            flash(f"Lỗi chạy thủ công: {ex}", "danger")
+        target["last_run_date"] = datetime.utcnow().date().isoformat()
+        target["last_run_at"] = datetime.utcnow().isoformat() + "Z"
+        with _REPORT_PROJECTS_LOCK:
+            projects = _load_report_projects(report_projects_file)
+            for idx, p in enumerate(projects):
+                if p.get("id") == project_id:
+                    projects[idx] = target
+                    break
+            _save_report_projects(report_projects_file, projects)
+        return redirect(url_for("report_projects"))
 
     @app.post("/dashboard/push-sheet")
     def push_sheet():

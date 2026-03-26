@@ -172,6 +172,7 @@ def push_yesterday_report_to_sheet(
     customer_id: str,
     sections: Optional[List[str]] = None,
     scan_range: str = "A1:CF60",
+    login_customer_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Ghi dữ liệu chiến dịch (hôm qua) vào Google Sheet.
@@ -182,7 +183,7 @@ def push_yesterday_report_to_sheet(
     project_root = os.path.dirname(os.path.abspath(__file__))
     yaml_path = os.path.join(project_root, "google-ads.yaml")
     client = load_google_ads_client(
-        yaml_path, default_login_customer_id=os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
+        yaml_path, default_login_customer_id=login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
     )
     campaign_rows = get_yesterday_campaign_performance(client, [customer_id])
 
