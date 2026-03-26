@@ -307,7 +307,9 @@ def build_sheets_service() -> Any:
                             }
 
                             if (not pem_body_b64_ok) and pad_fixed_ok:
-                                repaired_compact = candidate3.rstrip("=")  # keep minimal padding in PEM
+                                # Keep '=' padding intact; stripping it can reintroduce InvalidPadding
+                                # for downstream PEM parsers.
+                                repaired_compact = candidate3
                                 wrapped = "\n".join(repaired_compact[i : i + 64] for i in range(0, len(repaired_compact), 64))
                                 info["private_key"] = f"{begin}\n{wrapped}\n{end}\n"
                                 pem_body_b64_ok = True
