@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import re
 from dataclasses import asdict
@@ -153,8 +154,20 @@ def build_sheets_service() -> Any:
             except Exception as ex:
                 raise RuntimeError(f"Invalid GOOGLE_SA_JSON_B64: {ex}") from ex
         elif raw_text:
-            content = raw_text
+            content = raw_text.strip()
+            # Common copy/paste issue: env value wrapped in quotes.
+            if (content.startswith('"') and content.endswith('"')) or (content.startswith("'") and content.endswith("'")):
+                content = content[1:-1]
         if content:
+            # Validate JSON early to surface a clear error message.
+            try:
+                json.loads(content)
+            except Exception as ex:
+                raise RuntimeError(
+                    "Service account JSON is invalid. "
+                    "Khuyến nghị dùng GOOGLE_SA_JSON_B64 (base64 từ file .json) thay vì GOOGLE_SA_JSON raw. "
+                    f"Parse error: {ex}"
+                ) from ex
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
 
