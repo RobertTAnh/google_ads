@@ -22,6 +22,7 @@ from google_ads_helper import (
     list_child_accounts_under_mcc,
     optimize_budgets_by_cpa,
 )
+from sheets_reporter import push_yesterday_report_to_sheet
 
 _ACCOUNT_CACHE: dict = {"ts": 0.0, "mcc_id": "", "mcc_name": "", "children": []}
 
@@ -129,6 +130,10 @@ def create_app() -> Flask:
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
     dashboard_customer_ids = _env_list("CLIENT_CUSTOMER_IDS", "")
+    sheet_spreadsheet_id = (os.getenv("SHEET_SPREADSHEET_ID") or "").strip()
+    sheet_tab_name = (os.getenv("SHEET_TAB_NAME") or "2.2 Report Ads google").strip()
+    sheet_sections_env = (os.getenv("SHEET_SECTIONS") or "").strip()
+    sheet_scan_range = (os.getenv("SHEET_SCAN_RANGE") or "A1:CF60").strip()
     admin_username = (os.getenv("ADMIN_USERNAME") or "admin").strip()
     admin_password_hash = (os.getenv("ADMIN_PASSWORD_HASH") or "").strip()
     admin_password_plain = os.getenv("ADMIN_PASSWORD")
@@ -328,6 +333,8 @@ def create_app() -> Flask:
                 report_date=None,
                 can_fetch_report_js=False,
                 show_report_cta=False,
+                sheet_push_enabled=bool(sheet_spreadsheet_id),
+                sheet_tab_name=sheet_tab_name,
             )
 
         report_q: dict = {"report": "1"}
@@ -361,7 +368,36 @@ def create_app() -> Flask:
             report_date=report_date,
             can_fetch_report_js=bool(requested_customer_id),
             show_report_cta=show_report_cta,
+            sheet_push_enabled=bool(sheet_spreadsheet_id),
+            sheet_tab_name=sheet_tab_name,
         )
+
+    @app.post("/dashboard/push-sheet")
+    def push_sheet():
+        customer_id = _normalize_customer_id(request.form.get("customer_id", ""))
+        if not customer_id:
+            flash("Thiếu customer_id để ghi sheet.", "warning")
+            return redirect(url_for("dashboard"))
+        if not sheet_spreadsheet_id:
+            flash("Thiếu cấu hình SHEET_SPREADSHEET_ID trên môi trường.", "warning")
+            return redirect(url_for("dashboard", customer_id=customer_id, report=1))
+
+        sections = [x.strip() for x in sheet_sections_env.split(",") if x.strip()] if sheet_sections_env else None
+        try:
+            result = push_yesterday_report_to_sheet(
+                spreadsheet_id=sheet_spreadsheet_id,
+                sheet_name=sheet_tab_name,
+                customer_id=customer_id,
+                sections=sections,
+                scan_range=sheet_scan_range,
+            )
+            flash(
+                f"Đã nhập sheet thành công: {result['sheet']} | ngày {result['date']} | ô cập nhật {result['cells']}.",
+                "success",
+            )
+        except Exception as ex:
+            flash(f"Lỗi nhập sheet: {ex}", "danger")
+        return redirect(url_for("dashboard", customer_id=customer_id, report=1))
 
     @app.get("/create-campaign")
     def create_campaign_form():
@@ -455,6 +491,8 @@ def create_app() -> Flask:
                 report_date=None,
                 can_fetch_report_js=bool(_normalize_customer_id(customer_id)),
                 show_report_cta=False,
+                sheet_push_enabled=bool(sheet_spreadsheet_id),
+                sheet_tab_name=sheet_tab_name,
             )
         except (ValueError, GoogleAdsHelperError) as e:
             flash(str(e), "danger")

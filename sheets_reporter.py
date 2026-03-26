@@ -165,6 +165,84 @@ def batch_update_values(
     service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
 
 
+def push_yesterday_report_to_sheet(
+    *,
+    spreadsheet_id: str,
+    sheet_name: str,
+    customer_id: str,
+    sections: Optional[List[str]] = None,
+    scan_range: str = "A1:CF60",
+) -> Dict[str, Any]:
+    """
+    Ghi dữ liệu chiến dịch (hôm qua) vào Google Sheet.
+    Trả về metadata để hiển thị cho UI/API.
+    """
+    sections = [x.strip() for x in (sections or []) if x and x.strip()]
+
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    yaml_path = os.path.join(project_root, "google-ads.yaml")
+    client = load_google_ads_client(
+        yaml_path, default_login_customer_id=os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
+    )
+    campaign_rows = get_yesterday_campaign_performance(client, [customer_id])
+
+    if not sections:
+        # Auto-map theo campaign name thực có dữ liệu hôm qua.
+        seen = set()
+        auto_sections: List[str] = []
+        for r in campaign_rows:
+            name = (r.campaign_name or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                auto_sections.append(name)
+        sections = auto_sections
+    if not sections:
+        raise RuntimeError("Không có campaign nào để điền vào sheet.")
+
+    svc = build_sheets_service()
+    grid = load_sheet_values(svc, spreadsheet_id, sheet_name, scan_range)
+    if not grid:
+        raise RuntimeError("Không đọc được sheet values (range trống hoặc sai sheet-name/range).")
+
+    dmy = _yesterday_dmy()
+    metric_labels = ["Chi phí", "Hiển thị", "Click", "Chuyển đổi"]
+    updates: List[Tuple[int, int, Any]] = []
+
+    for section in sections:
+        header_row = _find_section_row(grid, section, col_idx=1)
+        if header_row is None:
+            raise RuntimeError(f"Không tìm thấy section '{section}' trong cột B (range {scan_range}).")
+
+        date_col = _find_date_col(grid, header_row, dmy)
+        if date_col is None:
+            raise RuntimeError(f"Không tìm thấy cột ngày '{dmy}' tại hàng section '{section}'.")
+
+        metric_rows = _find_metric_rows(grid, header_row + 1, metric_labels, col_idx=1, scan_limit=25)
+        missing = [m for m in metric_labels if m not in metric_rows]
+        if missing:
+            raise RuntimeError(f"Section '{section}' thiếu các hàng metric: {', '.join(missing)}")
+
+        summed = _sum_rows_for_campaign(campaign_rows, section)
+        cost_vnd = int(round(float(summed.cost or 0.0)))
+        updates.extend(
+            [
+                (metric_rows["Chi phí"], date_col, cost_vnd),
+                (metric_rows["Hiển thị"], date_col, int(summed.impressions or 0)),
+                (metric_rows["Click"], date_col, int(summed.clicks or 0)),
+                (metric_rows["Chuyển đổi"], date_col, float(summed.conversions or 0.0)),
+            ]
+        )
+
+    batch_update_values(svc, spreadsheet_id, sheet_name, updates)
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet": sheet_name,
+        "date": dmy,
+        "sections": sections,
+        "cells": len(updates),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Đổ báo cáo Google Ads (yesterday) vào Google Sheet.")
     parser.add_argument("--spreadsheet-id", required=True, help="Spreadsheet ID (phần giữa /d/.../edit).")
@@ -187,59 +265,17 @@ def main() -> None:
     customer_id = args.customer_id.strip()
     sections = [x.strip() for x in args.sections.split(",") if x.strip()]
 
-    # 1) Lấy dữ liệu Ads hôm qua theo campaign
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    yaml_path = os.path.join(project_root, "google-ads.yaml")
-    client = load_google_ads_client(yaml_path, default_login_customer_id=os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None)
     try:
-        campaign_rows = get_yesterday_campaign_performance(client, [customer_id])
-    except GoogleAdsHelperError as e:
-        raise SystemExit(str(e))
-
-    # 2) Kết nối Sheets + đọc grid để tìm vị trí
-    svc = build_sheets_service()
-    grid = load_sheet_values(svc, spreadsheet_id, sheet_name, args.scan_range)
-    if not grid:
-        raise SystemExit("Không đọc được sheet values (range trống hoặc sai sheet-name/range).")
-
-    dmy = _yesterday_dmy()  # ví dụ 25/3
-
-    # 3) Với mỗi section, xác định cột ngày + các dòng metric rồi ghi giá trị
-    metric_labels = ["Chi phí", "Hiển thị", "Click", "Chuyển đổi"]
-    updates: List[Tuple[int, int, Any]] = []
-
-    for section in sections:
-        header_row = _find_section_row(grid, section, col_idx=1)
-        if header_row is None:
-            raise SystemExit(f"Không tìm thấy section '{section}' trong cột B (range {args.scan_range}).")
-
-        date_col = _find_date_col(grid, header_row, dmy)
-        if date_col is None:
-            raise SystemExit(f"Không tìm thấy cột ngày '{dmy}' tại hàng section '{section}'.")
-
-        metric_rows = _find_metric_rows(grid, header_row + 1, metric_labels, col_idx=1, scan_limit=25)
-        missing = [m for m in metric_labels if m not in metric_rows]
-        if missing:
-            raise SystemExit(f"Section '{section}' thiếu các hàng metric: {', '.join(missing)}")
-
-        summed = _sum_rows_for_campaign(campaign_rows, section)
-
-        # Giá trị điền: Chi phí (làm tròn đến đồng), còn lại như số.
-        cost_vnd = int(round(float(summed.cost or 0.0)))
-        updates.extend(
-            [
-                (metric_rows["Chi phí"], date_col, cost_vnd),
-                (metric_rows["Hiển thị"], date_col, int(summed.impressions or 0)),
-                (metric_rows["Click"], date_col, int(summed.clicks or 0)),
-                (metric_rows["Chuyển đổi"], date_col, float(summed.conversions or 0.0)),
-            ]
+        result = push_yesterday_report_to_sheet(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            customer_id=customer_id,
+            sections=sections,
+            scan_range=args.scan_range,
         )
-
-    batch_update_values(svc, spreadsheet_id, sheet_name, updates)
-    print(
-        "OK. Đã ghi sheet:",
-        {"spreadsheet_id": spreadsheet_id, "sheet": sheet_name, "date": dmy, "sections": sections, "cells": len(updates)},
-    )
+    except (GoogleAdsHelperError, RuntimeError) as e:
+        raise SystemExit(str(e))
+    print("OK. Đã ghi sheet:", result)
 
 
 if __name__ == "__main__":
