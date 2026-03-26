@@ -270,18 +270,47 @@ def build_sheets_service() -> Any:
                         base64.b64decode(body_compact, validate=True)
                         pem_body_b64_ok = True
                     except Exception:
-                        if " " in body_compact:
+                        # Attempt repairs without exposing content:
+                        # 1) '+' -> ' ' corruption (already compacted, but keep as generic)
+                        # 2) base64url '-' '_' translation
+                        # 3) missing '=' padding
+                        def _try_validate(s: str) -> bool:
                             try:
-                                base64.b64decode(body_compact.replace(" ", "+"), validate=True)
-                                pem_body_b64_ok_after_space_fix = True
+                                base64.b64decode(s, validate=True)
+                                return True
                             except Exception:
-                                pass
+                                return False
+
+                        candidate = body_compact.replace(" ", "+")
+                        if _try_validate(candidate):
+                            pem_body_b64_ok_after_space_fix = True
                         else:
-                            try:
-                                base64.b64decode(body_compact.replace(" ", "+"), validate=True)
-                                pem_body_b64_ok_after_space_fix = True
-                            except Exception:
-                                pass
+                            # base64url -> standard
+                            candidate2 = candidate.replace("-", "+").replace("_", "/")
+                            url_fixed_ok = _try_validate(candidate2)
+                            # add '=' padding to multiple-of-4
+                            pad_missing = (-len(candidate2)) % 4
+                            candidate3 = candidate2 + ("=" * pad_missing) if pad_missing else candidate2
+                            pad_fixed_ok = _try_validate(candidate3)
+
+                            # Count invalid chars (only counts; no content)
+                            b64chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+                            bad = sum(1 for ch in candidate if ch not in b64chars)
+                            info["_pem_dbg_repair"] = {
+                                "len_mod4": (len(candidate2) % 4),
+                                "pad_missing": int(pad_missing),
+                                "has_dash": ("-" in candidate),
+                                "has_underscore": ("_" in candidate),
+                                "bad_char_count": int(bad),
+                                "url_fixed_ok": bool(url_fixed_ok),
+                                "pad_fixed_ok": bool(pad_fixed_ok),
+                            }
+
+                            if (not pem_body_b64_ok) and pad_fixed_ok:
+                                repaired_compact = candidate3.rstrip("=")  # keep minimal padding in PEM
+                                wrapped = "\n".join(repaired_compact[i : i + 64] for i in range(0, len(repaired_compact), 64))
+                                info["private_key"] = f"{begin}\n{wrapped}\n{end}\n"
+                                pem_body_b64_ok = True
 
                     # Apply repair only if it makes the base64 body valid.
                     if (not pem_body_b64_ok) and pem_body_b64_ok_after_space_fix:
@@ -299,6 +328,7 @@ def build_sheets_service() -> Any:
                     "pem_lf": int(pem_lf),
                     "pem_body_b64_ok": bool(pem_body_b64_ok),
                     "pem_body_b64_ok_after_space_fix": bool(pem_body_b64_ok_after_space_fix),
+                    "pem_repair": info.get("_pem_dbg_repair", None),
                 }
             except Exception:
                 pass
