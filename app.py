@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -28,12 +28,13 @@ from google_ads_helper import (
     get_yesterday_campaign_performance,
     get_customer_name,
     load_google_ads_client,
+    load_google_ads_client_from_dict,
     list_child_accounts_under_mcc,
     optimize_budgets_by_cpa,
 )
 from sheets_reporter import push_yesterday_report_to_sheet
 
-_ACCOUNT_CACHE: dict = {"ts": 0.0, "mcc_id": "", "mcc_name": "", "children": []}
+_ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
 _REPORT_SCHEDULER_STARTED = False
 _REPORT_SCHEDULER_START_LOCK = threading.Lock()
@@ -90,6 +91,67 @@ def _read_login_customer_id_from_yaml(yaml_path: str) -> str:
     except OSError:
         return ""
     return ""
+
+
+def _load_mcc_configs_from_env(shared_defaults: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, str]]:
+    """
+    Optional multi-MCC config from env JSON:
+    Backward-compatible accepted shapes:
+    1) Flat map (legacy):
+       {
+         "8776919182": {"label":"MCC A", "developer_token":"...", "client_id":"...", "client_secret":"...", "refresh_token":"...", "login_customer_id":"8776919182"}
+       }
+    2) Shared + per-MCC:
+       {
+         "shared": {"developer_token":"...", "client_id":"...", "client_secret":"...", "refresh_token":"..."},
+         "mccs": {
+           "8776919182": {"label":"MCC A", "login_customer_id":"8776919182"},
+           "1234567890": {"label":"MCC B", "login_customer_id":"1234567890"}
+         }
+       }
+    """
+    raw = (os.getenv("GOOGLE_ADS_MCC_CONFIGS") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    shared = dict(shared_defaults or {})
+    mcc_items = parsed
+    if isinstance(parsed.get("shared"), dict):
+        for key in ("developer_token", "client_id", "client_secret", "refresh_token"):
+            v = str(parsed["shared"].get(key, "")).strip()
+            if v:
+                shared[key] = v
+    if isinstance(parsed.get("mccs"), dict):
+        mcc_items = parsed["mccs"]
+
+    out: Dict[str, Dict[str, str]] = {}
+    for raw_key, cfg in mcc_items.items():
+        if not isinstance(cfg, dict):
+            continue
+        mcc_id = _normalize_customer_id(
+            str(cfg.get("login_customer_id", "") or cfg.get("mcc_id", "") or raw_key)
+        )
+        if not mcc_id:
+            continue
+        out[mcc_id] = {
+            "mcc_id": mcc_id,
+            "label": str(cfg.get("label", "") or "").strip(),
+            "developer_token": str(cfg.get("developer_token", "") or shared.get("developer_token", "")).strip(),
+            "client_id": str(cfg.get("client_id", "") or shared.get("client_id", "")).strip(),
+            "client_secret": str(cfg.get("client_secret", "") or shared.get("client_secret", "")).strip(),
+            "refresh_token": str(cfg.get("refresh_token", "") or shared.get("refresh_token", "")).strip(),
+        }
+    return out
+
+
+def _is_complete_mcc_config(cfg: Dict[str, str]) -> bool:
+    required = ("developer_token", "client_id", "client_secret", "refresh_token", "mcc_id")
+    return all(str(cfg.get(k, "")).strip() for k in required)
 
 def _maybe_bootstrap_google_ads_yaml(project_root: Path) -> str:
     """
@@ -573,12 +635,60 @@ def create_app() -> Flask:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
     _maybe_start_report_scheduler(report_projects_file, database_url or None)
 
-    # Your MCC ID should live in google-ads.yaml as `login_customer_id`.
-    # If you want to hard-enforce it from environment, set GOOGLE_ADS_LOGIN_CUSTOMER_ID.
+    # Single-MCC fallback config (legacy).
     mcc_login_customer_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
     configured_mcc_id = _normalize_customer_id(
         mcc_login_customer_id or _read_login_customer_id_from_yaml(google_ads_yaml)
     )
+    shared_google_ads_defaults = {
+        "developer_token": (os.getenv("GOOGLE_ADS_SHARED_DEVELOPER_TOKEN") or "").strip(),
+        "client_id": (os.getenv("GOOGLE_ADS_SHARED_CLIENT_ID") or "").strip(),
+        "client_secret": (os.getenv("GOOGLE_ADS_SHARED_CLIENT_SECRET") or "").strip(),
+        "refresh_token": (os.getenv("GOOGLE_ADS_SHARED_REFRESH_TOKEN") or "").strip(),
+    }
+    mcc_configs = _load_mcc_configs_from_env(shared_google_ads_defaults)
+    default_mcc_id = configured_mcc_id or (next(iter(mcc_configs.keys())) if mcc_configs else "")
+
+    def _resolve_active_mcc_id() -> str:
+        requested = _normalize_customer_id(request.args.get("mcc_id", ""))
+        if requested:
+            return requested
+        return _normalize_customer_id(str(session.get("active_mcc_id", "") or "")) or default_mcc_id
+
+    def _build_google_ads_client_for_mcc(mcc_id: str):
+        mcc_id = _normalize_customer_id(mcc_id)
+        cfg = mcc_configs.get(mcc_id)
+        if cfg and _is_complete_mcc_config(cfg):
+            conf_dict: Dict[str, Any] = {
+                "developer_token": cfg["developer_token"],
+                "client_id": cfg["client_id"],
+                "client_secret": cfg["client_secret"],
+                "refresh_token": cfg["refresh_token"],
+                "login_customer_id": mcc_id,
+                "use_proto_plus": True,
+            }
+            return load_google_ads_client_from_dict(conf_dict)
+        return load_google_ads_client(google_ads_yaml, default_login_customer_id=mcc_id or mcc_login_customer_id)
+
+    def _mcc_options_for_ui() -> list[dict]:
+        if mcc_configs:
+            return [
+                {
+                    "mcc_id": mcc_id,
+                    "label": (cfg.get("label") or f"MCC { _format_customer_id_display(mcc_id) }"),
+                    "source": "env_json",
+                }
+                for mcc_id, cfg in mcc_configs.items()
+            ]
+        if default_mcc_id:
+            return [
+                {
+                    "mcc_id": default_mcc_id,
+                    "label": f"MCC { _format_customer_id_display(default_mcc_id) }",
+                    "source": "yaml",
+                }
+            ]
+        return []
 
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
@@ -617,43 +727,53 @@ def create_app() -> Flask:
             return {
                 "mcc_name": "",
                 "mcc_id": "",
+                "active_mcc_id": "",
+                "mcc_options": [],
                 "child_accounts": [],
                 "mcc_context_error": "",
             }
         try:
-            client = load_google_ads_client(
-                google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-            )
-            mcc_id = configured_mcc_id
+            mcc_id = _resolve_active_mcc_id()
+            if mcc_id:
+                session["active_mcc_id"] = mcc_id
             if not mcc_id:
                 return {
                     "mcc_name": "",
                     "mcc_id": "",
+                    "active_mcc_id": "",
+                    "mcc_options": _mcc_options_for_ui(),
                     "child_accounts": [],
                     "mcc_context_error": "Thiếu login_customer_id trong cấu hình.",
                 }
+            client = _build_google_ads_client_for_mcc(mcc_id)
 
             now = time.time()
+            cached = _ACCOUNT_CACHE_BY_MCC.get(mcc_id) or {}
             if (
-                _ACCOUNT_CACHE["mcc_id"] == mcc_id
-                and (now - float(_ACCOUNT_CACHE["ts"])) < 60
-                and _ACCOUNT_CACHE["children"]
+                (now - float(cached.get("ts", 0.0))) < 60
+                and cached.get("children")
             ):
                 return {
-                    "mcc_name": _ACCOUNT_CACHE["mcc_name"],
-                    "mcc_id": _format_customer_id_display(_ACCOUNT_CACHE["mcc_id"]),
-                    "child_accounts": _ACCOUNT_CACHE["children"],
+                    "mcc_name": str(cached.get("mcc_name", "")),
+                    "mcc_id": _format_customer_id_display(mcc_id),
+                    "active_mcc_id": mcc_id,
+                    "mcc_options": _mcc_options_for_ui(),
+                    "child_accounts": cached.get("children", []),
                     "mcc_context_error": "",
                 }
 
             mcc_name = get_customer_name(client, mcc_id)
             children = list_child_accounts_under_mcc(client, mcc_id)
-            _ACCOUNT_CACHE.update(
-                {"ts": now, "mcc_id": mcc_id, "mcc_name": mcc_name, "children": children}
-            )
+            _ACCOUNT_CACHE_BY_MCC[mcc_id] = {
+                "ts": now,
+                "mcc_name": mcc_name,
+                "children": children,
+            }
             return {
                 "mcc_name": mcc_name,
                 "mcc_id": _format_customer_id_display(mcc_id),
+                "active_mcc_id": mcc_id,
+                "mcc_options": _mcc_options_for_ui(),
                 "child_accounts": children,
                 "mcc_context_error": "",
             }
@@ -661,7 +781,9 @@ def create_app() -> Flask:
             # Keep MCC visible even if account-list lookup fails.
             return {
                 "mcc_name": "",
-                "mcc_id": _format_customer_id_display(configured_mcc_id),
+                "mcc_id": _format_customer_id_display(_resolve_active_mcc_id()),
+                "active_mcc_id": _resolve_active_mcc_id(),
+                "mcc_options": _mcc_options_for_ui(),
                 "child_accounts": [],
                 "mcc_context_error": str(ex),
             }
@@ -710,22 +832,25 @@ def create_app() -> Flask:
     def healthz():
         return jsonify({"ok": True}), 200
 
+    @app.get("/api/mcc-options")
+    def api_mcc_options():
+        return jsonify({"ok": True, "items": _mcc_options_for_ui(), "default_mcc_id": default_mcc_id})
+
     @app.get("/api/mcc-accounts")
     def api_mcc_accounts():
         """
         JSON test endpoint: child accounts under the configured MCC (GAQL customer_client).
         """
-        if not configured_mcc_id:
+        active_mcc_id = _resolve_active_mcc_id()
+        if not active_mcc_id:
             return jsonify({"ok": False, "error": "Thiếu login_customer_id trong cấu hình."}), 400
         try:
-            client = load_google_ads_client(
-                google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-            )
-            children = list_child_accounts_under_mcc(client, configured_mcc_id)
+            client = _build_google_ads_client_for_mcc(active_mcc_id)
+            children = list_child_accounts_under_mcc(client, active_mcc_id)
             return jsonify(
                 {
                     "ok": True,
-                    "mcc_customer_id": configured_mcc_id,
+                    "mcc_customer_id": active_mcc_id,
                     "count": len(children),
                     "accounts": [asdict(a) for a in children],
                 }
@@ -743,9 +868,7 @@ def create_app() -> Flask:
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
         try:
-            client = load_google_ads_client(
-                google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-            )
+            client = _build_google_ads_client_for_mcc(_resolve_active_mcc_id())
             rows = get_yesterday_campaign_performance(client, [cid])
             rdate = _local_yesterday_iso()
             return jsonify(
@@ -765,6 +888,9 @@ def create_app() -> Flask:
         requested_customer_id_raw = (request.args.get("customer_id") or "").strip()
         requested_customer_id = _normalize_customer_id(requested_customer_id_raw)
         want_report = request.args.get("report", "").strip().lower() in ("1", "true", "yes")
+        selected_mcc_id = _resolve_active_mcc_id()
+        if selected_mcc_id:
+            session["active_mcc_id"] = selected_mcc_id
 
         if requested_customer_id:
             customer_ids = [requested_customer_id]
@@ -787,6 +913,7 @@ def create_app() -> Flask:
                 report_date=None,
                 can_fetch_report_js=False,
                 show_report_cta=False,
+                selected_mcc_id=selected_mcc_id,
                 sheet_push_enabled=bool(sheet_spreadsheet_id),
                 sheet_tab_name=sheet_tab_name,
             )
@@ -794,6 +921,8 @@ def create_app() -> Flask:
         report_q: dict = {"report": "1"}
         if requested_customer_id_raw:
             report_q["customer_id"] = requested_customer_id_raw
+        if selected_mcc_id:
+            report_q["mcc_id"] = selected_mcc_id
         report_url = url_for("dashboard", **report_q)
 
         rows = []
@@ -801,9 +930,7 @@ def create_app() -> Flask:
         report_date = None
         if want_report:
             try:
-                client = load_google_ads_client(
-                    google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-                )
+                client = _build_google_ads_client_for_mcc(selected_mcc_id)
                 rows = get_yesterday_campaign_performance(client, customer_ids)
                 report_date = _local_yesterday_iso()
             except GoogleAdsHelperError as e:
@@ -822,6 +949,7 @@ def create_app() -> Flask:
             report_date=report_date,
             can_fetch_report_js=bool(requested_customer_id),
             show_report_cta=show_report_cta,
+            selected_mcc_id=selected_mcc_id,
             sheet_push_enabled=bool(sheet_spreadsheet_id),
             sheet_tab_name=sheet_tab_name,
         )
@@ -1005,12 +1133,13 @@ def create_app() -> Flask:
     @app.post("/dashboard/push-sheet")
     def push_sheet():
         customer_id = _normalize_customer_id(request.form.get("customer_id", ""))
+        selected_mcc_id = _normalize_customer_id(request.form.get("mcc_id", "")) or _resolve_active_mcc_id()
         if not customer_id:
             flash("Thiếu customer_id để ghi sheet.", "warning")
             return redirect(url_for("dashboard"))
         if not sheet_spreadsheet_id:
             flash("Thiếu cấu hình SHEET_SPREADSHEET_ID trên môi trường.", "warning")
-            return redirect(url_for("dashboard", customer_id=customer_id, report=1))
+            return redirect(url_for("dashboard", customer_id=customer_id, report=1, mcc_id=selected_mcc_id))
 
         sections = [x.strip() for x in sheet_sections_env.split(",") if x.strip()] if sheet_sections_env else None
         try:
@@ -1020,6 +1149,7 @@ def create_app() -> Flask:
                 customer_id=customer_id,
                 sections=sections,
                 scan_range=sheet_scan_range,
+                login_customer_id=selected_mcc_id or None,
                 time_zone=sheet_time_zone or "Asia/Ho_Chi_Minh",
             )
             flash(
@@ -1028,7 +1158,7 @@ def create_app() -> Flask:
             )
         except Exception as ex:
             flash(f"Lỗi nhập sheet: {ex}", "danger")
-        return redirect(url_for("dashboard", customer_id=customer_id, report=1))
+        return redirect(url_for("dashboard", customer_id=customer_id, report=1, mcc_id=selected_mcc_id))
 
     @app.get("/create-campaign")
     def create_campaign_form():
@@ -1057,9 +1187,7 @@ def create_app() -> Flask:
             return redirect(url_for("create_campaign_form"))
 
         try:
-            client = load_google_ads_client(
-                google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-            )
+            client = _build_google_ads_client_for_mcc(_resolve_active_mcc_id())
             result = create_performance_max_campaign_for_local_leads(
                 client,
                 customer_id,
@@ -1098,9 +1226,8 @@ def create_app() -> Flask:
             return redirect(url_for("dashboard"))
 
         try:
-            client = load_google_ads_client(
-                google_ads_yaml, default_login_customer_id=mcc_login_customer_id
-            )
+            selected_mcc_id = _resolve_active_mcc_id()
+            client = _build_google_ads_client_for_mcc(selected_mcc_id)
             result = optimize_budgets_by_cpa(
                 client, customer_id, target_cpa=target_cpa, date_range="LAST_30_DAYS", increase_pct=0.10
             )
@@ -1118,10 +1245,11 @@ def create_app() -> Flask:
                 current_customer_id=customer_id,
                 want_report=False,
                 normalized_customer_id=_normalize_customer_id(customer_id),
-                report_url=url_for("dashboard", customer_id=customer_id, report=1),
+                report_url=url_for("dashboard", customer_id=customer_id, report=1, mcc_id=selected_mcc_id),
                 report_date=None,
                 can_fetch_report_js=bool(_normalize_customer_id(customer_id)),
                 show_report_cta=False,
+                selected_mcc_id=selected_mcc_id,
                 sheet_push_enabled=bool(sheet_spreadsheet_id),
                 sheet_tab_name=sheet_tab_name,
             )

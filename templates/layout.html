@@ -33,7 +33,17 @@
             {% endif %}
           </ul>
 
-          {% if is_logged_in and mcc_id %}
+          {% if is_logged_in and (mcc_id or mcc_options) %}
+            <form method="get" action="{{ url_for('dashboard') }}" class="me-2 d-flex align-items-center gap-2">
+              <label for="mccSelectNav" class="small text-white-50">MCC</label>
+              <select class="form-select form-select-sm" id="mccSelectNav" name="mcc_id" onchange="this.form.submit()">
+                {% for opt in mcc_options %}
+                  <option value="{{ opt.mcc_id }}" {% if opt.mcc_id == active_mcc_id %}selected{% endif %}>
+                    {{ opt.label }} ({{ opt.mcc_id }})
+                  </option>
+                {% endfor %}
+              </select>
+            </form>
             <div class="dropdown">
               <button
                 class="btn btn-sm btn-outline-light dropdown-toggle d-flex align-items-center gap-2"
@@ -151,9 +161,14 @@
           if (!target) return;
           const id = target.getAttribute('data-account-id');
           if (!id) return;
+          const mccSelect = document.getElementById('mccSelectNav');
+          const selectedMcc = mccSelect ? mccSelect.value : '';
           const url = new URL(window.location.href);
           url.pathname = "{{ url_for('dashboard') }}";
           url.searchParams.set('customer_id', id);
+          if (selectedMcc) {
+            url.searchParams.set('mcc_id', selectedMcc);
+          }
           window.location.href = url.toString();
         });
       })();

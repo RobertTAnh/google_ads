@@ -16,6 +16,9 @@
   <div class="card mb-3">
     <div class="card-body">
       <form class="row g-2 align-items-end" method="get" action="{{ url_for('dashboard') }}">
+        {% if selected_mcc_id %}
+          <input type="hidden" name="mcc_id" value="{{ selected_mcc_id }}">
+        {% endif %}
         <div class="col-md-7">
           <label class="form-label">Tìm &amp; chọn tài khoản (ID / tên)</label>
           <input
@@ -49,7 +52,7 @@
           <div class="d-flex flex-wrap gap-2">
             {% for a in child_accounts[:12] %}
               <a class="btn btn-sm btn-outline-dark"
-                 href="{{ url_for('dashboard') }}?customer_id={{ a.customer_id }}">
+                 href="{{ url_for('dashboard') }}?customer_id={{ a.customer_id }}{% if selected_mcc_id %}&mcc_id={{ selected_mcc_id }}{% endif %}">
                 {% if a.is_manager %}
                   <span class="badge text-bg-secondary me-1">M</span>
                 {% endif %}
@@ -237,11 +240,17 @@
       </div>
       <div class="mt-2 text-muted small">
         API JSON (danh sách MCC): <a href="{{ url_for('api_mcc_accounts') }}">{{ url_for('api_mcc_accounts') }}</a>
+        {% if selected_mcc_id %}
+          <span class="ms-1">· đang chọn MCC <code>{{ selected_mcc_id }}</code></span>
+        {% endif %}
       </div>
       <div class="mt-3 d-flex justify-content-end">
         {% if normalized_customer_id %}
           <form method="post" action="{{ url_for('push_sheet') }}">
             <input type="hidden" name="customer_id" value="{{ normalized_customer_id }}">
+            {% if selected_mcc_id %}
+              <input type="hidden" name="mcc_id" value="{{ selected_mcc_id }}">
+            {% endif %}
             <button
               type="submit"
               class="btn btn-success"
@@ -267,7 +276,11 @@
         var id = sel.value;
         if (!id) return;
         var base = {{ url_for('dashboard') | tojson }};
-        window.location.href = base + '?customer_id=' + encodeURIComponent(id);
+        var query = '?customer_id=' + encodeURIComponent(id);
+        {% if selected_mcc_id %}
+          query += '&mcc_id=' + encodeURIComponent({{ selected_mcc_id | tojson }});
+        {% endif %}
+        window.location.href = base + query;
       });
     })();
   </script>

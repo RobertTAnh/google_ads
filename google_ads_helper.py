@@ -106,6 +106,21 @@ def load_google_ads_client(
     return client
 
 
+def load_google_ads_client_from_dict(
+    config_data: Dict[str, Any],
+    *,
+    api_version: str = "v23",
+) -> GoogleAdsClient:
+    """
+    Loads Google Ads client configuration from an in-memory dict.
+    Useful for multi-MCC setups where each MCC credentials live in env JSON.
+    """
+    try:
+        return GoogleAdsClient.load_from_dict(config_data, version=api_version)
+    except Exception as e:
+        raise GoogleAdsHelperError(f"Failed to load Google Ads client from env config: {e}") from e
+
+
 def list_accessible_customer_ids(client: GoogleAdsClient) -> List[str]:
     """
     Google-supported pattern: `CustomerService.list_accessible_customers`.
