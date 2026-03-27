@@ -17,8 +17,9 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import List
 
 from google.ads.googleads.errors import GoogleAdsException
@@ -48,8 +49,9 @@ def _resolve_customer_ids() -> List[str]:
 
 
 def _yesterday_label() -> str:
-    """Ngày báo cáo theo lịch local (Google Ads dùng múi giờ tài khoản cho YESTERDAY)."""
-    d = date.today() - timedelta(days=1)
+    """Nhãn ngày theo lịch VN (server UTC không làm lệch 'hôm qua'). API vẫn dùng YESTERDAY theo múi giờ tài khoản."""
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    d = datetime.now(tz).date() - timedelta(days=1)
     return d.isoformat()
 
 

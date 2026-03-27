@@ -6,8 +6,9 @@ import json
 import os
 import re
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from google.oauth2.service_account import Credentials
@@ -24,8 +25,17 @@ from google_ads_helper import (
 MetricKey = str
 
 
-def _yesterday_dmy() -> str:
-    d = date.today() - timedelta(days=1)
+def _safe_tz(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def _yesterday_dmy(time_zone: str = "Asia/Ho_Chi_Minh") -> str:
+    """Ngày 'hôm qua' theo lịch múi giờ báo cáo (khớp cột dd/m trên sheet)."""
+    tz = _safe_tz(time_zone)
+    d = datetime.now(tz).date() - timedelta(days=1)
     return f"{d.day}/{d.month}"
 
 
@@ -320,6 +330,7 @@ def push_yesterday_report_to_sheet(
     sections: Optional[List[str]] = None,
     scan_range: str = "A1:CF60",
     login_customer_id: Optional[str] = None,
+    time_zone: str = "Asia/Ho_Chi_Minh",
 ) -> Dict[str, Any]:
     """
     Ghi dữ liệu chiến dịch (hôm qua) vào Google Sheet.
@@ -352,7 +363,7 @@ def push_yesterday_report_to_sheet(
     if not grid:
         raise RuntimeError("Không đọc được sheet values (range trống hoặc sai sheet-name/range).")
 
-    dmy = _yesterday_dmy()
+    dmy = _yesterday_dmy(time_zone)
     metric_labels = ["Chi phí", "Hiển thị", "Click", "Chuyển đổi"]
     updates: List[Tuple[int, int, Any]] = []
 
@@ -406,6 +417,11 @@ def main() -> None:
         default="A1:CF60",
         help="Range đủ lớn để chứa header ngày + block metrics (mặc định A1:CF60).",
     )
+    parser.add_argument(
+        "--time-zone",
+        default="Asia/Ho_Chi_Minh",
+        help="IANA tz để khớp cột ngày trên sheet với 'hôm qua' (mặc định Asia/Ho_Chi_Minh).",
+    )
     args = parser.parse_args()
 
     spreadsheet_id = args.spreadsheet_id.strip()
@@ -420,6 +436,7 @@ def main() -> None:
             customer_id=customer_id,
             sections=sections,
             scan_range=args.scan_range,
+            time_zone=args.time_zone.strip() or "Asia/Ho_Chi_Minh",
         )
     except (GoogleAdsHelperError, RuntimeError) as e:
         raise SystemExit(str(e))

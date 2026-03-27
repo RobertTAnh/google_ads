@@ -6,7 +6,7 @@ import os
 import re
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
@@ -296,6 +296,12 @@ def _safe_tz(tz_name: str) -> ZoneInfo:
         return ZoneInfo("Asia/Ho_Chi_Minh")
 
 
+def _local_yesterday_iso(tz_name: str = "Asia/Ho_Chi_Minh") -> str:
+    """Ngày 'hôm qua' theo lịch múi giờ (khớp sheet / kỳ vọng người dùng VN khi server chạy UTC)."""
+    tz = _safe_tz(tz_name)
+    return (datetime.now(tz).date() - timedelta(days=1)).isoformat()
+
+
 def _stable_spread_offset_minutes(project_id: str, window_minutes: int) -> int:
     if window_minutes <= 0:
         return 0
@@ -395,6 +401,7 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                             sections=None,
                             scan_range="A1:CF60",
                             login_customer_id=str(p.get("mcc", "")).strip() or None,
+                            time_zone=str(p.get("time_zone", "Asia/Ho_Chi_Minh") or "Asia/Ho_Chi_Minh"),
                         )
                         p["last_status"] = "success"
                         p["last_error"] = ""
@@ -471,6 +478,7 @@ def create_app() -> Flask:
     sheet_tab_name = (os.getenv("SHEET_TAB_NAME") or "2.2 Report Ads google").strip()
     sheet_sections_env = (os.getenv("SHEET_SECTIONS") or "").strip()
     sheet_scan_range = (os.getenv("SHEET_SCAN_RANGE") or "A1:CF60").strip()
+    sheet_time_zone = (os.getenv("SHEET_TIME_ZONE") or "Asia/Ho_Chi_Minh").strip()
     admin_username = (os.getenv("ADMIN_USERNAME") or "admin").strip()
     admin_password_hash = (os.getenv("ADMIN_PASSWORD_HASH") or "").strip()
     admin_password_plain = os.getenv("ADMIN_PASSWORD")
@@ -630,7 +638,7 @@ def create_app() -> Flask:
                 google_ads_yaml, default_login_customer_id=mcc_login_customer_id
             )
             rows = get_yesterday_campaign_performance(client, [cid])
-            rdate = (date.today() - timedelta(days=1)).isoformat()
+            rdate = _local_yesterday_iso()
             return jsonify(
                 {
                     "ok": True,
@@ -688,7 +696,7 @@ def create_app() -> Flask:
                     google_ads_yaml, default_login_customer_id=mcc_login_customer_id
                 )
                 rows = get_yesterday_campaign_performance(client, customer_ids)
-                report_date = (date.today() - timedelta(days=1)).isoformat()
+                report_date = _local_yesterday_iso()
             except GoogleAdsHelperError as e:
                 error = str(e)
 
@@ -843,6 +851,7 @@ def create_app() -> Flask:
                 sections=None,
                 scan_range="A1:CF60",
                 login_customer_id=str(target.get("mcc", "")).strip() or None,
+                time_zone=str(target.get("time_zone", "Asia/Ho_Chi_Minh") or "Asia/Ho_Chi_Minh"),
             )
             target["last_status"] = "success"
             target["last_error"] = ""
@@ -881,6 +890,7 @@ def create_app() -> Flask:
                 customer_id=customer_id,
                 sections=sections,
                 scan_range=sheet_scan_range,
+                time_zone=sheet_time_zone or "Asia/Ho_Chi_Minh",
             )
             flash(
                 f"Đã nhập sheet thành công: {result['sheet']} | ngày {result['date']} | ô cập nhật {result['cells']}.",
