@@ -145,7 +145,8 @@ def _init_report_projects_table(database_url: str) -> None:
       last_run_at TEXT NOT NULL DEFAULT '',
       last_status TEXT NOT NULL DEFAULT '',
       last_error TEXT NOT NULL DEFAULT '',
-      last_result JSONB
+      last_result JSONB,
+      run_logs JSONB
     );
     """
     with psycopg.connect(database_url, autocommit=True) as conn:
@@ -153,6 +154,50 @@ def _init_report_projects_table(database_url: str) -> None:
             cur.execute(ddl)
             # Backward-compatible migration for old tables created before project_name existed.
             cur.execute("ALTER TABLE report_projects ADD COLUMN IF NOT EXISTS project_name TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE report_projects ADD COLUMN IF NOT EXISTS run_logs JSONB")
+
+
+def _normalize_run_logs(raw: object, *, limit: int = 7) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "run_at": str(item.get("run_at", "")),
+                "status": str(item.get("status", "")),
+                "message": str(item.get("message", "")),
+                "report_date": str(item.get("report_date", "")),
+                "cells": int(item.get("cells", 0) or 0),
+            }
+        )
+    if limit > 0:
+        return out[:limit]
+    return out
+
+
+def _append_project_run_log(
+    project: dict,
+    *,
+    run_at: str,
+    status: str,
+    message: str,
+    report_date: str = "",
+    cells: int = 0,
+    keep: int = 7,
+) -> None:
+    entry = {
+        "run_at": str(run_at or ""),
+        "status": str(status or ""),
+        "message": str(message or ""),
+        "report_date": str(report_date or ""),
+        "cells": int(cells or 0),
+    }
+    logs = _normalize_run_logs(project.get("run_logs"), limit=0)
+    logs.insert(0, entry)
+    project["run_logs"] = logs[: max(1, keep)]
 
 
 def _db_report_projects_count(database_url: str) -> int:
@@ -187,7 +232,7 @@ def _load_report_projects(path: Path, database_url: Optional[str] = None) -> lis
         query = """
             SELECT
               id, project_name, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
-              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
+              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result, run_logs
             FROM report_projects
             ORDER BY created_at DESC
         """
@@ -213,6 +258,7 @@ def _load_report_projects(path: Path, database_url: Optional[str] = None) -> lis
                             "last_status": row[12] or "",
                             "last_error": row[13] or "",
                             "last_result": row[14] if isinstance(row[14], dict) else {},
+                            "run_logs": _normalize_run_logs(row[15], limit=7),
                         }
                     )
         return out
@@ -251,15 +297,16 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
                 "last_result": (
                     Jsonb(p.get("last_result")) if isinstance(p.get("last_result"), (dict, list)) else None
                 ),
+                "run_logs": Jsonb(_normalize_run_logs(p.get("run_logs"), limit=7)),
             }
 
         upsert = """
             INSERT INTO report_projects (
               id, project_name, mcc, cid, sheet_spreadsheet_id, sheet_tab_name, schedule_time, time_zone,
-              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result
+              active, created_at, last_run_date, last_run_at, last_status, last_error, last_result, run_logs
             ) VALUES (
               %(id)s, %(project_name)s, %(mcc)s, %(cid)s, %(sheet_spreadsheet_id)s, %(sheet_tab_name)s, %(schedule_time)s, %(time_zone)s,
-              %(active)s, %(created_at)s, %(last_run_date)s, %(last_run_at)s, %(last_status)s, %(last_error)s, %(last_result)s
+              %(active)s, %(created_at)s, %(last_run_date)s, %(last_run_at)s, %(last_status)s, %(last_error)s, %(last_result)s, %(run_logs)s
             )
             ON CONFLICT (id) DO UPDATE SET
               project_name = EXCLUDED.project_name,
@@ -275,7 +322,8 @@ def _save_report_projects(path: Path, projects: list[dict], database_url: Option
               last_run_at = EXCLUDED.last_run_at,
               last_status = EXCLUDED.last_status,
               last_error = EXCLUDED.last_error,
-              last_result = EXCLUDED.last_result
+              last_result = EXCLUDED.last_result,
+              run_logs = EXCLUDED.run_logs
         """
         ids = [str(p.get("id", "")) for p in projects if str(p.get("id", ""))]
         with psycopg.connect(database_url, autocommit=True) as conn:
@@ -435,6 +483,7 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                 due_queue.sort(key=lambda x: x[0])
                 changed = False
                 for _, p, today_local, effective_sched in due_queue:
+                    run_at_utc = datetime.utcnow().isoformat() + "Z"
                     try:
                         result = push_yesterday_report_to_sheet(
                             spreadsheet_id=str(p.get("sheet_spreadsheet_id", "")),
@@ -448,11 +497,29 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                         p["last_status"] = "success"
                         p["last_error"] = ""
                         p["last_result"] = result
+                        _append_project_run_log(
+                            p,
+                            run_at=run_at_utc,
+                            status="success",
+                            message="NHẬP SHEET THÀNH CÔNG",
+                            report_date=str(result.get("date", "")),
+                            cells=int(result.get("cells", 0) or 0),
+                            keep=7,
+                        )
                     except Exception as ex:
                         p["last_status"] = "error"
                         p["last_error"] = f"{effective_sched} | {ex}"
+                        _append_project_run_log(
+                            p,
+                            run_at=run_at_utc,
+                            status="error",
+                            message=str(ex),
+                            report_date="",
+                            cells=0,
+                            keep=7,
+                        )
                     p["last_run_date"] = today_local
-                    p["last_run_at"] = datetime.utcnow().isoformat() + "Z"
+                    p["last_run_at"] = run_at_utc
                     changed = True
                     if throttle_seconds > 0:
                         time.sleep(throttle_seconds)
@@ -799,6 +866,7 @@ def create_app() -> Flask:
             "last_run_at": "",
             "last_status": "",
             "last_error": "",
+            "run_logs": [],
         }
         with _REPORT_PROJECTS_LOCK:
             projects = _load_report_projects(report_projects_file, database_url or None)
@@ -886,6 +954,7 @@ def create_app() -> Flask:
             flash("Không tìm thấy project.", "warning")
             return redirect(url_for("report_projects"))
         try:
+            run_at_utc = datetime.utcnow().isoformat() + "Z"
             result = push_yesterday_report_to_sheet(
                 spreadsheet_id=str(target.get("sheet_spreadsheet_id", "")),
                 sheet_name=str(target.get("sheet_tab_name", "")),
@@ -898,13 +967,32 @@ def create_app() -> Flask:
             target["last_status"] = "success"
             target["last_error"] = ""
             target["last_result"] = result
+            _append_project_run_log(
+                target,
+                run_at=run_at_utc,
+                status="success",
+                message="NHẬP SHEET THÀNH CÔNG",
+                report_date=str(result.get("date", "")),
+                cells=int(result.get("cells", 0) or 0),
+                keep=7,
+            )
             flash("Đã chạy nhập sheet thủ công thành công.", "success")
         except Exception as ex:
+            run_at_utc = datetime.utcnow().isoformat() + "Z"
             target["last_status"] = "error"
             target["last_error"] = str(ex)
+            _append_project_run_log(
+                target,
+                run_at=run_at_utc,
+                status="error",
+                message=str(ex),
+                report_date="",
+                cells=0,
+                keep=7,
+            )
             flash(f"Lỗi chạy thủ công: {ex}", "danger")
         target["last_run_date"] = datetime.utcnow().date().isoformat()
-        target["last_run_at"] = datetime.utcnow().isoformat() + "Z"
+        target["last_run_at"] = run_at_utc
         with _REPORT_PROJECTS_LOCK:
             projects = _load_report_projects(report_projects_file, database_url or None)
             for idx, p in enumerate(projects):

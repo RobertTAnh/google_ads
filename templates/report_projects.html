@@ -57,6 +57,22 @@
     .rp-log-success { color: #26f28b; }
     .rp-log-error { color: #ff8e8e; }
     .rp-log-muted { color: #9ca9db; }
+    .rp-project-name-strong {
+      color: #f7f9ff;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      text-shadow: 0 0 10px rgba(124, 156, 255, 0.25);
+    }
+    .rp-log-list {
+      max-height: 420px;
+      overflow-y: auto;
+    }
+    .rp-log-item {
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(39, 54, 122, 0.45);
+      line-height: 1.5;
+    }
+    .rp-log-item:last-child { border-bottom: 0; }
   </style>
 
   <div class="rp-wrap">
@@ -256,9 +272,9 @@
         </div>
         <div class="modal-body">
           <div class="small rp-muted mb-2">Tên project</div>
-          <div class="fw-semibold mb-3" id="resultProjectName">-</div>
-          <div class="small rp-muted mb-2">Nhật ký gần nhất</div>
-          <div class="rp-log-box" id="resultSimpleLog">-</div>
+          <div class="rp-project-name-strong mb-3" id="resultProjectName">-</div>
+          <div class="small rp-muted mb-2">Nhật ký 7 ngày gần nhất</div>
+          <div class="rp-log-box rp-log-list" id="resultSimpleLog">-</div>
         </div>
         <div class="modal-footer border-0">
           <button type="button" class="btn rp-btn-ghost" data-bs-dismiss="modal">Đóng</button>
@@ -325,18 +341,79 @@
         var date = result.date || runDate;
         var box = document.getElementById('resultSimpleLog');
         var line = '';
+        var runDatePart = runAt;
+        var runTimePart = '-';
+
+        if (runAt && runAt.indexOf('T') >= 0) {
+          var parts = runAt.replace('Z', '').split('T');
+          runDatePart = parts[0] || '-';
+          runTimePart = (parts[1] || '').split('.')[0] || '-';
+        }
+        var logs = Array.isArray(p.run_logs) ? p.run_logs : [];
+
+        function splitIsoDateTime(iso) {
+          var out = { date: '-', time: '-' };
+          var s = String(iso || '');
+          if (!s || s === '-') return out;
+          if (s.indexOf('T') >= 0) {
+            var parts = s.replace('Z', '').split('T');
+            out.date = parts[0] || '-';
+            out.time = ((parts[1] || '').split('.')[0]) || '-';
+            return out;
+          }
+          out.date = s;
+          return out;
+        }
+
+        function escapeHtml(s) {
+          return String(s || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
 
         if (status === 'success') {
-          line = runAt + ' [INFO] [sheet] ✅ NHẬP SHEET THÀNH CÔNG | ngày: ' + date + ' | ô cập nhật: ' + cells;
+          line =
+            '[INFO] [sheet] ✅ NHẬP SHEET THÀNH CÔNG\n' +
+            '- Ngày chạy: ' + runDatePart + '\n' +
+            '- Giờ chạy: ' + runTimePart + '\n' +
+            '- Ngày dữ liệu ghi: ' + date + '\n' +
+            '- Ô cập nhật: ' + cells;
           box.className = 'rp-log-box rp-log-success';
         } else if (status === 'error') {
-          line = runAt + ' [ERROR] [sheet] ❌ NHẬP SHEET THẤT BẠI | ' + (p.last_error || 'Không có chi tiết lỗi');
+          line =
+            '[ERROR] [sheet] ❌ NHẬP SHEET THẤT BẠI\n' +
+            '- Ngày chạy: ' + runDatePart + '\n' +
+            '- Giờ chạy: ' + runTimePart + '\n' +
+            '- Chi tiết: ' + (p.last_error || 'Không có chi tiết lỗi');
           box.className = 'rp-log-box rp-log-error';
         } else {
           line = 'Chưa có dữ liệu chạy cho project này.';
           box.className = 'rp-log-box rp-log-muted';
         }
-        box.textContent = line;
+        if (logs.length > 0) {
+          box.className = 'rp-log-box rp-log-list';
+          box.innerHTML = logs.slice(0, 7).map(function (log) {
+            var dt = splitIsoDateTime(log.run_at || '');
+            var st = (log.status || '').toLowerCase();
+            var isOk = st === 'success';
+            var symbol = isOk ? '✅' : '❌';
+            var lvl = isOk ? '[INFO]' : '[ERROR]';
+            var msg = isOk
+              ? 'NHẬP SHEET THÀNH CÔNG'
+              : ('NHẬP SHEET THẤT BẠI | ' + (log.message || 'Không có chi tiết lỗi'));
+            var tail = isOk
+              ? (' | ngày dữ liệu: ' + (log.report_date || '-') + ' | ô cập nhật: ' + (log.cells || 0))
+              : '';
+            return '<div class="rp-log-item ' + (isOk ? 'rp-log-success' : 'rp-log-error') + '">' +
+              escapeHtml(dt.date + ' ' + dt.time + ' ' + lvl + ' [sheet] ' + symbol + ' ' + msg + tail) +
+              '</div>';
+          }).join('');
+        } else {
+          box.textContent = line;
+        }
       });
     });
   })();
