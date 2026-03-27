@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -302,15 +304,47 @@ def _local_yesterday_iso(tz_name: str = "Asia/Ho_Chi_Minh") -> str:
     return (datetime.now(tz).date() - timedelta(days=1)).isoformat()
 
 
-def _stable_spread_offset_minutes(project_id: str, window_minutes: int) -> int:
-    if window_minutes <= 0:
-        return 0
-    # Deterministic small spread by project id.
-    seed = sum(project_id.encode("utf-8"))
-    return seed % (window_minutes + 1)
+def _daily_minute_slots_for_projects(
+    projects: List[dict],
+    *,
+    day_key: str,
+    default_schedule: str = "06:00",
+) -> dict[str, int]:
+    """
+    +1 phút / 1 project cho mốc 06:00.
+    Mỗi ngày random thứ tự project nhưng ổn định trong ngày đó.
+    """
+    spread_enabled = str(os.getenv("REPORT_ENABLE_SPREAD", "1")).strip().lower() in ("1", "true", "yes")
+    if not spread_enabled:
+        return {}
+
+    candidate_ids: List[str] = []
+    for p in projects:
+        if not p.get("active", True):
+            continue
+        base = str(p.get("schedule_time", default_schedule) or default_schedule).strip()
+        if base == "06:00":
+            pid = str(p.get("id", "")).strip()
+            if pid:
+                candidate_ids.append(pid)
+
+    if len(candidate_ids) <= 1:
+        return {}
+
+    seed_src = f"{day_key}|{','.join(sorted(candidate_ids))}"
+    seed = int(hashlib.sha256(seed_src.encode("utf-8")).hexdigest()[:16], 16)
+    rng = random.Random(seed)
+    shuffled = candidate_ids[:]
+    rng.shuffle(shuffled)
+    return {pid: idx for idx, pid in enumerate(shuffled)}
 
 
-def _effective_schedule_time(project: dict, *, default_schedule: str = "06:00") -> str:
+def _effective_schedule_time(
+    project: dict,
+    *,
+    default_schedule: str = "06:00",
+    minute_slots: Optional[dict[str, int]] = None,
+) -> str:
     """
     Stagger jobs around base time to avoid thundering herd at exactly 06:00.
     Applies spread only when base time is 06:00.
@@ -321,10 +355,9 @@ def _effective_schedule_time(project: dict, *, default_schedule: str = "06:00") 
     hh, mm = [int(x) for x in base.split(":")]
     total = hh * 60 + mm
 
-    spread_enabled = str(os.getenv("REPORT_ENABLE_SPREAD", "1")).strip().lower() in ("1", "true", "yes")
-    spread_window = int((os.getenv("REPORT_SPREAD_WINDOW_MINUTES") or "40").strip() or 40)
-    if spread_enabled and base == "06:00" and spread_window > 0:
-        total += _stable_spread_offset_minutes(str(project.get("id", "")), spread_window)
+    if base == "06:00" and minute_slots:
+        project_id = str(project.get("id", "")).strip()
+        total += int(minute_slots.get(project_id, 0))
 
     total %= 24 * 60
     return f"{total // 60:02d}:{total % 60:02d}"
@@ -372,6 +405,11 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                     projects = _load_report_projects(path, database_url)
 
                 now_utc = datetime.utcnow().replace(tzinfo=ZoneInfo("UTC"))
+                minute_slots = _daily_minute_slots_for_projects(
+                    projects,
+                    day_key=now_utc.date().isoformat(),
+                    default_schedule="06:00",
+                )
                 due_queue: list[tuple[datetime, dict, str, str]] = []
                 for p in projects:
                     if not p.get("active", True):
@@ -382,7 +420,11 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                     today_local = now_local.date().isoformat()
                     if str(p.get("last_run_date", "")) == today_local:
                         continue
-                    effective_sched = _effective_schedule_time(p, default_schedule="06:00")
+                    effective_sched = _effective_schedule_time(
+                        p,
+                        default_schedule="06:00",
+                        minute_slots=minute_slots,
+                    )
                     if not re.match(r"^\d{2}:\d{2}$", effective_sched):
                         continue
                     hh, mm = [int(x) for x in effective_sched.split(":")]
