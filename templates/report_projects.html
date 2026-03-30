@@ -341,27 +341,55 @@
         var date = result.date || runDate;
         var box = document.getElementById('resultSimpleLog');
         var line = '';
-        var runDatePart = runAt;
-        var runTimePart = '-';
-
-        if (runAt && runAt.indexOf('T') >= 0) {
-          var parts = runAt.replace('Z', '').split('T');
-          runDatePart = parts[0] || '-';
-          runTimePart = (parts[1] || '').split('.')[0] || '-';
-        }
+        var displayTz = p.time_zone || 'Asia/Ho_Chi_Minh'; // UTC+7 (VN)
+        var runParts = splitIsoDateTime(runAt, displayTz);
+        var runDatePart = runParts.date;
+        var runTimePart = runParts.time;
         var logs = Array.isArray(p.run_logs) ? p.run_logs : [];
 
-        function splitIsoDateTime(iso) {
+        function splitIsoDateTime(iso, timeZone) {
           var out = { date: '-', time: '-' };
           var s = String(iso || '');
           if (!s || s === '-') return out;
-          if (s.indexOf('T') >= 0) {
+
+          // If it's not an ISO datetime, treat it as date-only.
+          if (s.indexOf('T') < 0) {
+            out.date = s;
+            return out;
+          }
+
+          var d = new Date(s); // Parse ISO, where trailing "Z" means UTC.
+          if (isNaN(d.getTime())) {
+            // Fallback: keep previous behavior.
             var parts = s.replace('Z', '').split('T');
             out.date = parts[0] || '-';
             out.time = ((parts[1] || '').split('.')[0]) || '-';
             return out;
           }
-          out.date = s;
+
+          var tz = timeZone || 'Asia/Ho_Chi_Minh';
+          try {
+            var dateFmt = new Intl.DateTimeFormat('en-CA', {
+              timeZone: tz,
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+            });
+            var timeFmt = new Intl.DateTimeFormat('en-GB', {
+              timeZone: tz,
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            });
+            out.date = dateFmt.format(d);
+            out.time = timeFmt.format(d);
+          } catch (e) {
+            // If Intl fails (rare), fallback to string split.
+            var parts = s.replace('Z', '').split('T');
+            out.date = parts[0] || '-';
+            out.time = ((parts[1] || '').split('.')[0]) || '-';
+          }
           return out;
         }
 
@@ -396,7 +424,7 @@
         if (logs.length > 0) {
           box.className = 'rp-log-box rp-log-list';
           box.innerHTML = logs.slice(0, 7).map(function (log) {
-            var dt = splitIsoDateTime(log.run_at || '');
+            var dt = splitIsoDateTime(log.run_at || '', displayTz);
             var st = (log.status || '').toLowerCase();
             var isOk = st === 'success';
             var symbol = isOk ? '✅' : '❌';
