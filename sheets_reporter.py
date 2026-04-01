@@ -376,11 +376,13 @@ def push_yesterday_report_to_sheet(
     dmy = _yesterday_dmy(time_zone)
     metric_labels = ["Chi phí", "Hiển thị", "Click", "Chuyển đổi"]
     updates: List[Tuple[int, int, Any]] = []
+    skipped_sections: List[str] = []
 
     for section in sections:
         header_row = _find_section_row(grid, section, col_idx=1)
         if header_row is None:
-            raise RuntimeError(f"Không tìm thấy section '{section}' trong cột B (range {scan_range}).")
+            skipped_sections.append(section)
+            continue
 
         date_col = _find_date_col(grid, header_row, dmy)
         if date_col is None:
@@ -402,13 +404,15 @@ def push_yesterday_report_to_sheet(
             ]
         )
 
-    batch_update_values(svc, spreadsheet_id, sheet_name, updates)
+    if updates:
+        batch_update_values(svc, spreadsheet_id, sheet_name, updates)
     return {
         "spreadsheet_id": spreadsheet_id,
         "sheet": sheet_name,
         "date": dmy,
         "sections": sections,
         "cells": len(updates),
+        "skipped_sections": skipped_sections,
     }
 
 

@@ -434,6 +434,7 @@ def get_yesterday_campaign_performance(
 
     GAQL:
     - `FROM campaign` + `segments.date DURING YESTERDAY` — metrics gắn với campaign + ngày.
+    - Chỉ chiến dịch đang bật hoặc tạm dừng (bỏ REMOVED / không còn dùng).
     """
     ga_service = client.get_service("GoogleAdsService")
     query = """
@@ -448,6 +449,7 @@ def get_yesterday_campaign_performance(
           metrics.conversions
         FROM campaign
         WHERE segments.date DURING YESTERDAY
+          AND campaign.status IN (ENABLED, PAUSED)
     """.strip()
 
     rows: List[CampaignPerformanceRow] = []
