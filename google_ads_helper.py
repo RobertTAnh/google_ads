@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -82,9 +85,7 @@ def load_google_ads_client(
     api_version: str = "v23",
 ) -> GoogleAdsClient:
     """
-    Loads Google Ads client configuration from google-ads.yaml.
-
-    - The `google-ads.yaml` should be in your project root (per your requirement).
+    Loads Google Ads client configuration from a `google-ads.yaml` file (optional fallback if not using env JSON).
     - Ensure `login_customer_id` is set to your MCC customer ID so calls can access
       child accounts under your manager.
     """
@@ -119,6 +120,146 @@ def load_google_ads_client_from_dict(
         return GoogleAdsClient.load_from_dict(config_data, version=api_version)
     except Exception as e:
         raise GoogleAdsHelperError(f"Failed to load Google Ads client from env config: {e}") from e
+
+
+def normalize_google_ads_customer_id(raw: str) -> str:
+    """
+    Google Ads customer IDs are 10 digits. Accepts "240-746-9372", "2407469372",
+    or labels with a parenthetical "(3787956462)".
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    last_paren_id = ""
+    for m in re.finditer(r"\(([^)]*)\)", s):
+        inner = "".join(ch for ch in m.group(1) if ch.isdigit())
+        if len(inner) == 10:
+            last_paren_id = inner
+    if last_paren_id:
+        return last_paren_id
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) == 10:
+        return digits
+    if len(digits) > 10:
+        return digits[-10:]
+    return digits
+
+
+def read_login_customer_id_from_yaml(yaml_path: str) -> str:
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith("login_customer_id"):
+                    _, value = stripped.split(":", 1)
+                    return normalize_google_ads_customer_id(value.strip().strip("'\""))
+    except OSError:
+        return ""
+    return ""
+
+
+def google_ads_shared_oauth_defaults_from_env() -> Dict[str, str]:
+    """Optional env fallbacks merged into GOOGLE_ADS_MCC_CONFIGS JSON (shared block or per-MCC gaps)."""
+    return {
+        "developer_token": (os.getenv("GOOGLE_ADS_SHARED_DEVELOPER_TOKEN") or "").strip(),
+        "client_id": (os.getenv("GOOGLE_ADS_SHARED_CLIENT_ID") or "").strip(),
+        "client_secret": (os.getenv("GOOGLE_ADS_SHARED_CLIENT_SECRET") or "").strip(),
+        "refresh_token": (os.getenv("GOOGLE_ADS_SHARED_REFRESH_TOKEN") or "").strip(),
+    }
+
+
+def load_google_ads_mcc_configs_from_env(
+    shared_defaults: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """
+    Parse GOOGLE_ADS_MCC_CONFIGS (JSON). Supports:
+    - flat map keyed by MCC id,
+    - {"shared": {...}, "mccs": {...}},
+    - {"mccs": {...}} only (production: one full credential set per MCC).
+    """
+    raw = (os.getenv("GOOGLE_ADS_MCC_CONFIGS") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if shared_defaults is None:
+        shared = dict(google_ads_shared_oauth_defaults_from_env())
+    else:
+        shared = dict(shared_defaults)
+    if isinstance(parsed.get("shared"), dict):
+        for key in ("developer_token", "client_id", "client_secret", "refresh_token"):
+            v = str(parsed["shared"].get(key, "")).strip()
+            if v:
+                shared[key] = v
+    mcc_items: Dict[str, Any] = parsed
+    if isinstance(parsed.get("mccs"), dict):
+        mcc_items = parsed["mccs"]
+
+    out: Dict[str, Dict[str, str]] = {}
+    for raw_key, cfg in mcc_items.items():
+        if not isinstance(cfg, dict):
+            continue
+        mcc_id = normalize_google_ads_customer_id(
+            str(cfg.get("login_customer_id", "") or cfg.get("mcc_id", "") or raw_key)
+        )
+        if not mcc_id:
+            continue
+        out[mcc_id] = {
+            "mcc_id": mcc_id,
+            "label": str(cfg.get("label", "") or "").strip(),
+            "developer_token": str(cfg.get("developer_token", "") or shared.get("developer_token", "")).strip(),
+            "client_id": str(cfg.get("client_id", "") or shared.get("client_id", "")).strip(),
+            "client_secret": str(cfg.get("client_secret", "") or shared.get("client_secret", "")).strip(),
+            "refresh_token": str(cfg.get("refresh_token", "") or shared.get("refresh_token", "")).strip(),
+        }
+    return out
+
+
+def mcc_google_ads_credentials_complete(cfg: Dict[str, str]) -> bool:
+    required = ("developer_token", "client_id", "client_secret", "refresh_token", "mcc_id")
+    return all(str(cfg.get(k, "")).strip() for k in required)
+
+
+def build_google_ads_client_for_mcc_id(
+    mcc_customer_id: str,
+    mcc_configs: Dict[str, Dict[str, str]],
+    *,
+    yaml_path: str,
+    yaml_default_login_customer_id: Optional[str] = None,
+    api_version: str = "v23",
+) -> GoogleAdsClient:
+    """
+    Prefer env `mcc_configs[mcc_id]` (full credentials per MCC).
+    Else optional `google-ads.yaml` at yaml_path if the file exists (or bootstrap via GOOGLE_ADS_YAML_* on deploy).
+    """
+    mcc_id = normalize_google_ads_customer_id(mcc_customer_id)
+    cfg = mcc_configs.get(mcc_id) if mcc_id else None
+    if cfg and mcc_google_ads_credentials_complete(cfg):
+        conf_dict: Dict[str, Any] = {
+            "developer_token": cfg["developer_token"],
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "refresh_token": cfg["refresh_token"],
+            "login_customer_id": mcc_id,
+            "use_proto_plus": True,
+        }
+        return load_google_ads_client_from_dict(conf_dict, api_version=api_version)
+    if yaml_path and os.path.isfile(yaml_path):
+        return load_google_ads_client(
+            yaml_path,
+            default_login_customer_id=mcc_id or yaml_default_login_customer_id,
+            api_version=api_version,
+        )
+    raise GoogleAdsHelperError(
+        "Thiếu credential Google Ads: thêm MCC này vào GOOGLE_ADS_MCC_CONFIGS (đủ developer_token + OAuth), "
+        "hoặc đặt file google-ads.yaml / biến GOOGLE_ADS_YAML_B64 hoặc GOOGLE_ADS_YAML_TEXT."
+    )
 
 
 def list_accessible_customer_ids(client: GoogleAdsClient) -> List[str]:

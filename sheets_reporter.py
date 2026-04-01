@@ -17,8 +17,11 @@ from googleapiclient.discovery import build
 from google_ads_helper import (
     CampaignPerformanceRow,
     GoogleAdsHelperError,
+    build_google_ads_client_for_mcc_id,
     get_yesterday_campaign_performance,
-    load_google_ads_client,
+    google_ads_shared_oauth_defaults_from_env,
+    load_google_ads_mcc_configs_from_env,
+    normalize_google_ads_customer_id,
 )
 
 
@@ -340,8 +343,15 @@ def push_yesterday_report_to_sheet(
 
     project_root = os.path.dirname(os.path.abspath(__file__))
     yaml_path = os.path.join(project_root, "google-ads.yaml")
-    client = load_google_ads_client(
-        yaml_path, default_login_customer_id=login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
+    mcc_id = normalize_google_ads_customer_id(
+        (login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "").strip()
+    )
+    mcc_configs = load_google_ads_mcc_configs_from_env(google_ads_shared_oauth_defaults_from_env())
+    client = build_google_ads_client_for_mcc_id(
+        mcc_id,
+        mcc_configs,
+        yaml_path=yaml_path,
+        yaml_default_login_customer_id=(os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "").strip() or None,
     )
     campaign_rows = get_yesterday_campaign_performance(client, [customer_id])
 
@@ -422,6 +432,11 @@ def main() -> None:
         default="Asia/Ho_Chi_Minh",
         help="IANA tz để khớp cột ngày trên sheet với 'hôm qua' (mặc định Asia/Ho_Chi_Minh).",
     )
+    parser.add_argument(
+        "--mcc-login-id",
+        default="",
+        help="MCC login_customer_id (10 số). Khớp entry trong GOOGLE_ADS_MCC_CONFIGS; mặc định dùng GOOGLE_ADS_LOGIN_CUSTOMER_ID.",
+    )
     args = parser.parse_args()
 
     spreadsheet_id = args.spreadsheet_id.strip()
@@ -429,6 +444,7 @@ def main() -> None:
     customer_id = args.customer_id.strip()
     sections = [x.strip() for x in args.sections.split(",") if x.strip()]
 
+    mcc_login = (args.mcc_login_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "").strip() or None
     try:
         result = push_yesterday_report_to_sheet(
             spreadsheet_id=spreadsheet_id,
@@ -436,6 +452,7 @@ def main() -> None:
             customer_id=customer_id,
             sections=sections,
             scan_range=args.scan_range,
+            login_customer_id=mcc_login,
             time_zone=args.time_zone.strip() or "Asia/Ho_Chi_Minh",
         )
     except (GoogleAdsHelperError, RuntimeError) as e:

@@ -5,10 +5,11 @@ Báo cáo hiệu suất Google Ads cho ngày hôm qua (chi phí, click, hiển t
 - Lịch 6h sáng mỗi ngày:  python bao_cao.py --schedule
 
 Cấu hình:
-  - google-ads.yaml ở thư mục gốc project (cùng cấp file này).
-  - CLIENT_CUSTOMER_IDS: danh sách ID tài khoản quảng cáo (tk con), phân tách bởi dấu phẩy
-    (giống app.py). Ví dụ: set biến môi trường hoặc chỉnh CUSTOMER_IDS bên dưới.
-  - GOOGLE_ADS_LOGIN_CUSTOMER_ID: (tùy chọn) ghi đè MCC nếu cần.
+  - GOOGLE_ADS_MCC_CONFIGS (JSON): mỗi MCC một bộ developer_token + OAuth (giống app / Railway).
+  - GOOGLE_ADS_SHARED_*: tùy chọn bổ sung cho JSON (client_id, …).
+  - CLIENT_CUSTOMER_IDS: danh sách ID tk con, phân tách bởi dấu phẩy.
+  - GOOGLE_ADS_LOGIN_CUSTOMER_ID: MCC context (bắt buộc nếu không có google-ads.yaml).
+  - google-ads.yaml hoặc GOOGLE_ADS_YAML_*: chỉ khi cần fallback (không bắt buộc nếu env JSON đủ).
 """
 
 from __future__ import annotations
@@ -27,9 +28,13 @@ from google.ads.googleads.errors import GoogleAdsException
 from google_ads_helper import (
     GoogleAdsHelperError,
     CampaignPerformanceRow,
+    build_google_ads_client_for_mcc_id,
     format_vnd_thousands,
     get_yesterday_campaign_performance,
-    load_google_ads_client,
+    google_ads_shared_oauth_defaults_from_env,
+    load_google_ads_mcc_configs_from_env,
+    normalize_google_ads_customer_id,
+    read_login_customer_id_from_yaml,
 )
 
 # --- Cấu hình nhanh (ưu tiên thấp hơn biến môi trường CLIENT_CUSTOMER_IDS) ---
@@ -125,8 +130,17 @@ def run_daily_report() -> None:
         )
         sys.exit(1)
 
-    login_override = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
-    client = load_google_ads_client(yaml_path, default_login_customer_id=login_override)
+    login_override = (os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "").strip() or None
+    if not login_override:
+        login_override = read_login_customer_id_from_yaml(yaml_path) or None
+    mcc_id = normalize_google_ads_customer_id(login_override or "")
+    mcc_configs = load_google_ads_mcc_configs_from_env(google_ads_shared_oauth_defaults_from_env())
+    client = build_google_ads_client_for_mcc_id(
+        mcc_id,
+        mcc_configs,
+        yaml_path=yaml_path,
+        yaml_default_login_customer_id=login_override,
+    )
 
     report_date = _yesterday_label()
     rows = get_yesterday_campaign_performance(client, customer_ids)

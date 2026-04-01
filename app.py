@@ -23,14 +23,16 @@ from psycopg.types.json import Jsonb
 
 from google_ads_helper import (
     GoogleAdsHelperError,
+    build_google_ads_client_for_mcc_id,
     create_performance_max_campaign_for_local_leads,
     format_vnd_thousands,
     get_yesterday_campaign_performance,
     get_customer_name,
-    load_google_ads_client,
-    load_google_ads_client_from_dict,
+    load_google_ads_mcc_configs_from_env,
     list_child_accounts_under_mcc,
+    normalize_google_ads_customer_id as _normalize_customer_id,
     optimize_budgets_by_cpa,
+    read_login_customer_id_from_yaml as _read_login_customer_id_from_yaml,
 )
 from sheets_reporter import push_yesterday_report_to_sheet
 
@@ -44,114 +46,11 @@ def _env_list(name: str, default: str = "") -> List[str]:
     raw = os.getenv(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
 
-def _normalize_customer_id(raw: str) -> str:
-    """
-    Google Ads customer IDs are 10 digits. Accepts "240-746-9372", "2407469372",
-    or datalist values like "Company … MST … (3787956462)" — must not merge every
-    digit in the label (e.g. tax ID + level + real ID) into one invalid ID.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    # Prefer the last parenthetical segment that contains exactly 10 digits (handles " (240-746-9372)").
-    last_paren_id = ""
-    for m in re.finditer(r"\(([^)]*)\)", s):
-        inner = "".join(ch for ch in m.group(1) if ch.isdigit())
-        if len(inner) == 10:
-            last_paren_id = inner
-    if last_paren_id:
-        return last_paren_id
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) == 10:
-        return digits
-    if len(digits) > 10:
-        return digits[-10:]
-    return digits
-
 def _format_customer_id_display(customer_id: str) -> str:
     digits = _normalize_customer_id(customer_id)
     if len(digits) == 10:
         return f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}"
     return customer_id
-
-def _read_login_customer_id_from_yaml(yaml_path: str) -> str:
-    """
-    Lightweight parser to read `login_customer_id` from google-ads.yaml.
-    Avoids requiring extra YAML dependencies.
-    """
-    try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if stripped.startswith("login_customer_id"):
-                    _, value = stripped.split(":", 1)
-                    return _normalize_customer_id(value.strip().strip("'\""))
-    except OSError:
-        return ""
-    return ""
-
-
-def _load_mcc_configs_from_env(shared_defaults: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, str]]:
-    """
-    Optional multi-MCC config from env JSON:
-    Backward-compatible accepted shapes:
-    1) Flat map (legacy):
-       {
-         "8776919182": {"label":"MCC A", "developer_token":"...", "client_id":"...", "client_secret":"...", "refresh_token":"...", "login_customer_id":"8776919182"}
-       }
-    2) Shared + per-MCC:
-       {
-         "shared": {"developer_token":"...", "client_id":"...", "client_secret":"...", "refresh_token":"..."},
-         "mccs": {
-           "8776919182": {"label":"MCC A", "login_customer_id":"8776919182"},
-           "1234567890": {"label":"MCC B", "login_customer_id":"1234567890"}
-         }
-       }
-    """
-    raw = (os.getenv("GOOGLE_ADS_MCC_CONFIGS") or "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    shared = dict(shared_defaults or {})
-    mcc_items = parsed
-    if isinstance(parsed.get("shared"), dict):
-        for key in ("developer_token", "client_id", "client_secret", "refresh_token"):
-            v = str(parsed["shared"].get(key, "")).strip()
-            if v:
-                shared[key] = v
-    if isinstance(parsed.get("mccs"), dict):
-        mcc_items = parsed["mccs"]
-
-    out: Dict[str, Dict[str, str]] = {}
-    for raw_key, cfg in mcc_items.items():
-        if not isinstance(cfg, dict):
-            continue
-        mcc_id = _normalize_customer_id(
-            str(cfg.get("login_customer_id", "") or cfg.get("mcc_id", "") or raw_key)
-        )
-        if not mcc_id:
-            continue
-        out[mcc_id] = {
-            "mcc_id": mcc_id,
-            "label": str(cfg.get("label", "") or "").strip(),
-            "developer_token": str(cfg.get("developer_token", "") or shared.get("developer_token", "")).strip(),
-            "client_id": str(cfg.get("client_id", "") or shared.get("client_id", "")).strip(),
-            "client_secret": str(cfg.get("client_secret", "") or shared.get("client_secret", "")).strip(),
-            "refresh_token": str(cfg.get("refresh_token", "") or shared.get("refresh_token", "")).strip(),
-        }
-    return out
-
-
-def _is_complete_mcc_config(cfg: Dict[str, str]) -> bool:
-    required = ("developer_token", "client_id", "client_secret", "refresh_token", "mcc_id")
-    return all(str(cfg.get(k, "")).strip() for k in required)
 
 def _maybe_bootstrap_google_ads_yaml(project_root: Path) -> str:
     """
@@ -646,7 +545,7 @@ def create_app() -> Flask:
         "client_secret": (os.getenv("GOOGLE_ADS_SHARED_CLIENT_SECRET") or "").strip(),
         "refresh_token": (os.getenv("GOOGLE_ADS_SHARED_REFRESH_TOKEN") or "").strip(),
     }
-    mcc_configs = _load_mcc_configs_from_env(shared_google_ads_defaults)
+    mcc_configs = load_google_ads_mcc_configs_from_env(shared_google_ads_defaults)
     default_mcc_id = configured_mcc_id or (next(iter(mcc_configs.keys())) if mcc_configs else "")
 
     def _resolve_active_mcc_id() -> str:
@@ -656,19 +555,12 @@ def create_app() -> Flask:
         return _normalize_customer_id(str(session.get("active_mcc_id", "") or "")) or default_mcc_id
 
     def _build_google_ads_client_for_mcc(mcc_id: str):
-        mcc_id = _normalize_customer_id(mcc_id)
-        cfg = mcc_configs.get(mcc_id)
-        if cfg and _is_complete_mcc_config(cfg):
-            conf_dict: Dict[str, Any] = {
-                "developer_token": cfg["developer_token"],
-                "client_id": cfg["client_id"],
-                "client_secret": cfg["client_secret"],
-                "refresh_token": cfg["refresh_token"],
-                "login_customer_id": mcc_id,
-                "use_proto_plus": True,
-            }
-            return load_google_ads_client_from_dict(conf_dict)
-        return load_google_ads_client(google_ads_yaml, default_login_customer_id=mcc_id or mcc_login_customer_id)
+        return build_google_ads_client_for_mcc_id(
+            mcc_id,
+            mcc_configs,
+            yaml_path=google_ads_yaml,
+            yaml_default_login_customer_id=mcc_login_customer_id,
+        )
 
     def _mcc_options_for_ui() -> list[dict]:
         if mcc_configs:
