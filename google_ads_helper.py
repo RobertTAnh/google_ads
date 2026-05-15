@@ -68,6 +68,223 @@ class KeywordPerformanceRow:
     conversions: float
 
 
+# GAQL predefined date ranges (segments.date DURING …). Dùng cho MCP / báo cáo kỳ.
+ALLOWED_MCP_DATE_RANGES: Tuple[str, ...] = ("YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS")
+
+
+@dataclass(frozen=True)
+class CustomerPeriodMetricsRow:
+    """Tổng metrics cấp tài khoản trong khoảng ngày GAQL (đã gộp nhiều ngày)."""
+
+    customer_id: str
+    customer_name: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class CampaignPeriodMetricsRow:
+    """Metrics theo chiến dịch trong khoảng ngày (đã gộp theo campaign)."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class KeywordPeriodMetricsRow:
+    """Keyword (keyword_view) đã gộp theo khoảng ngày."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    keyword_text: str
+    match_type: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class SearchTermPeriodMetricsRow:
+    """Cụm từ tìm kiếm thực tế (search_term_view), đã gộp theo khoảng ngày."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    search_term: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class CampaignBudgetPeriodRow:
+    """Campaign + ngân sách ngày (amount_micros) + metrics gộp trong kỳ — phục vụ CPA / pacing."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    status: str
+    date_range: str
+    daily_budget: float
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class AdPeriodMetricsRow:
+    """Quảng cáo (ad_group_ad) — metrics gộp trong kỳ."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    ad_id: str
+    ad_name: str
+    ad_type: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class NegativeKeywordRow:
+    """Từ khóa phủ định (campaign hoặc ad group). Không gắn segments.date."""
+
+    level: str  # "campaign" | "ad_group"
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    keyword_text: str
+    match_type: str
+
+
+@dataclass(frozen=True)
+class AdGroupPeriodMetricsRow:
+    """Nhóm quảng cáo — metrics gộp trong kỳ."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class KeywordQualityPeriodRow:
+    """Quality score (lịch sử) theo keyword; lấy bản ghi mới nhất theo segments.date trong kỳ."""
+
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    keyword_text: str
+    match_type: str
+    date_range: str
+    latest_segment_date: str
+    historical_quality_score: str
+    historical_creative_quality_score: str
+    historical_landing_page_quality_score: str
+
+
+@dataclass(frozen=True)
+class AudiencePeriodMetricsRow:
+    """Đối tượng (ad_group_audience_view) — metrics gộp kỳ."""
+
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    audience_display_name: str
+    criterion_type: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class AssetPeriodMetricsRow:
+    """Asset trong asset group (PMax / asset) — metrics gộp kỳ."""
+
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    asset_group_id: str
+    asset_group_name: str
+    asset_id: str
+    asset_name: str
+    asset_type: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
+class ChangeEventRow:
+    """Sự kiện thay đổi (change_event)."""
+
+    change_date_time: str
+    change_resource_type: str
+    user_email: str
+    client_type: str
+    resource_name: str
+    changed_fields: str
+
+
 class GoogleAdsHelperError(RuntimeError):
     """App-friendly wrapper for surfacing Google Ads errors."""
 
@@ -107,6 +324,30 @@ def _format_googleads_exception(ex: GoogleAdsException) -> str:
             loc = " @ " + ".".join(e.field_name for e in err.location.field_path_elements)
         parts.append(f"- {msg}{loc}")
     return "\n".join(parts)
+
+
+def normalize_mcp_date_range(raw: Optional[str]) -> str:
+    """
+    Chuẩn hóa date_range cho GAQL `segments.date DURING …`.
+    Chỉ chấp nhận literal an toàn (chống injection vào query).
+    """
+    s = (raw or "YESTERDAY").strip().upper()
+    if s not in ALLOWED_MCP_DATE_RANGES:
+        allowed = ", ".join(ALLOWED_MCP_DATE_RANGES)
+        raise GoogleAdsHelperError(f"date_range không hợp lệ: {raw!r}. Chọn một trong: {allowed}")
+    return s
+
+
+def _cpa_from_cost_and_conversions(cost: float, conversions: float) -> Optional[float]:
+    if conversions <= 0:
+        return None
+    return round(float(cost) / float(conversions), 6)
+
+
+def _proto_enum_name(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(getattr(value, "name", value) or "")
 
 
 def load_google_ads_client(
@@ -390,6 +631,1101 @@ def list_child_accounts_under_mcc(client: GoogleAdsClient, mcc_customer_id: str)
         raise GoogleAdsHelperError(f"Failed to list child accounts:\n{_format_googleads_exception(ex)}") from ex
 
 
+def get_customer_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+) -> List[CustomerPeriodMetricsRow]:
+    """Gộp metrics cấp tài khoản theo GAQL `segments.date DURING <date_range>`."""
+    dr = normalize_mcp_date_range(date_range)
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM customer
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[CustomerPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        clicks = impressions = 0
+        cost_micros = 0
+        conversions = 0.0
+        name = ""
+        found = False
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    found = True
+                    name = str(r.customer.descriptive_name or "")
+                    clicks += int(r.metrics.clicks or 0)
+                    impressions += int(r.metrics.impressions or 0)
+                    cost_micros += int(r.metrics.cost_micros or 0)
+                    conversions += float(r.metrics.conversions or 0.0)
+            cost = cost_micros / 1_000_000.0
+            if not found:
+                out.append(
+                    CustomerPeriodMetricsRow(
+                        customer_id=cid,
+                        customer_name="",
+                        date_range=dr,
+                        clicks=0,
+                        impressions=0,
+                        cost=0.0,
+                        conversions=0.0,
+                        cpa=None,
+                    )
+                )
+            else:
+                out.append(
+                    CustomerPeriodMetricsRow(
+                        customer_id=str(cid),
+                        customer_name=name,
+                        date_range=dr,
+                        clicks=clicks,
+                        impressions=impressions,
+                        cost=float(cost),
+                        conversions=float(conversions),
+                        cpa=_cpa_from_cost_and_conversions(cost, conversions),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(f"Google Ads API error for customer {cid}:\n{_format_googleads_exception(ex)}") from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+    return out
+
+
+def get_campaign_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+) -> List[CampaignPeriodMetricsRow]:
+    """Gộp metrics theo campaign trong kỳ (ENABLED + PAUSED)."""
+    dr = normalize_mcp_date_range(date_range)
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM campaign
+        WHERE segments.date DURING {dr}
+          AND campaign.status IN (ENABLED, PAUSED)
+    """.strip()
+
+    out: List[CampaignPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[str, Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    if cap_id not in acc:
+                        acc[cap_id] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[cap_id]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            for cap_id, a in acc.items():
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    CampaignPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            x.campaign_id,
+        )
+    )
+    return out
+
+
+def get_keyword_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit_per_customer: int = 500,
+) -> List[KeywordPeriodMetricsRow]:
+    """Gộp keyword_view theo kỳ; trả top `limit_per_customer` theo cost sau khi gộp."""
+    dr = normalize_mcp_date_range(date_range)
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 5000:
+        limit_per_customer = 5000
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM keyword_view
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[KeywordPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    ag_id = str(r.ad_group.id)
+                    crit_id = str(r.ad_group_criterion.criterion_id)
+                    key = (cap_id, ag_id, crit_id)
+                    mt = ""
+                    if r.ad_group_criterion.keyword.match_type:
+                        mt = r.ad_group_criterion.keyword.match_type.name
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "keyword_text": str(r.ad_group_criterion.keyword.text or ""),
+                            "match_type": mt,
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[key]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            for (cap_id, ag_id, crit_id), a in ranked:
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    KeywordPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=a["ad_group_name"],
+                        criterion_id=crit_id,
+                        keyword_text=a["keyword_text"],
+                        match_type=a["match_type"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error for keyword_view customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            (x.keyword_text or "").lower(),
+        )
+    )
+    return out
+
+
+def get_search_term_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit_per_customer: int = 400,
+) -> List[SearchTermPeriodMetricsRow]:
+    """Cụm từ tìm kiếm thực tế (search_term_view), gộp theo kỳ, top theo cost."""
+    dr = normalize_mcp_date_range(date_range)
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 5000:
+        limit_per_customer = 5000
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          search_term_view.search_term,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM search_term_view
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[SearchTermPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    ag_id = str(r.ad_group.id)
+                    term = str(r.search_term_view.search_term or "")
+                    key = (cap_id, ag_id, term)
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[key]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            for (cap_id, ag_id, term), a in ranked:
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    SearchTermPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=a["ad_group_name"],
+                        search_term=term,
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error for search_term_view customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            (x.search_term or "").lower(),
+        )
+    )
+    return out
+
+
+def get_campaign_budget_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+) -> List[CampaignBudgetPeriodRow]:
+    """Campaign + ngân sách ngày (amount_micros) + metrics gộp trong kỳ (CPA = cost / conv)."""
+    dr = normalize_mcp_date_range(date_range)
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.campaign_budget,
+          campaign_budget.amount_micros,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM campaign
+        WHERE segments.date DURING {dr}
+          AND campaign.status IN (ENABLED, PAUSED)
+    """.strip()
+
+    out: List[CampaignBudgetPeriodRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[str, Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    st = r.campaign.status.name if r.campaign.status else ""
+                    budget_micros = int(r.campaign_budget.amount_micros or 0)
+                    if cap_id not in acc:
+                        acc[cap_id] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "status": st,
+                            "budget_micros_max": budget_micros,
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[cap_id]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+                    if budget_micros > int(a["budget_micros_max"]):
+                        a["budget_micros_max"] = budget_micros
+            for cap_id, a in acc.items():
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                daily_budget = int(a["budget_micros_max"]) / 1_000_000.0
+                out.append(
+                    CampaignBudgetPeriodRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        status=str(a["status"]),
+                        date_range=dr,
+                        daily_budget=float(daily_budget),
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (campaign budget metrics) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            x.campaign_id,
+        )
+    )
+    return out
+
+
+def list_negative_keywords_for_customer(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+) -> List[NegativeKeywordRow]:
+    """
+    Danh sách từ khóa phủ định hiện tại (campaign + ad group).
+    Không dùng segments.date — cấu hình hiện hành.
+    """
+    ga_service = client.get_service("GoogleAdsService")
+    q_ag = """
+        SELECT
+          customer.id,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.type = KEYWORD
+          AND ad_group_criterion.negative = TRUE
+    """.strip()
+    q_c = """
+        SELECT
+          customer.id,
+          campaign.id,
+          campaign.name,
+          campaign_criterion.criterion_id,
+          campaign_criterion.keyword.text,
+          campaign_criterion.keyword.match_type
+        FROM campaign_criterion
+        WHERE campaign_criterion.type = KEYWORD
+          AND campaign_criterion.negative = TRUE
+    """.strip()
+
+    out: List[NegativeKeywordRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=q_ag)
+            for batch in stream:
+                for r in batch.results:
+                    out.append(
+                        NegativeKeywordRow(
+                            level="ad_group",
+                            customer_id=str(r.customer.id),
+                            campaign_id=str(r.campaign.id),
+                            campaign_name=str(r.campaign.name or ""),
+                            ad_group_id=str(r.ad_group.id),
+                            ad_group_name=str(r.ad_group.name or ""),
+                            criterion_id=str(r.ad_group_criterion.criterion_id),
+                            keyword_text=str(r.ad_group_criterion.keyword.text or ""),
+                            match_type=_proto_enum_name(getattr(r.ad_group_criterion.keyword, "match_type", None)),
+                        )
+                    )
+            stream2 = ga_service.search_stream(customer_id=cid, query=q_c)
+            for batch in stream2:
+                for r in batch.results:
+                    out.append(
+                        NegativeKeywordRow(
+                            level="campaign",
+                            customer_id=str(r.customer.id),
+                            campaign_id=str(r.campaign.id),
+                            campaign_name=str(r.campaign.name or ""),
+                            ad_group_id="",
+                            ad_group_name="",
+                            criterion_id=str(r.campaign_criterion.criterion_id),
+                            keyword_text=str(r.campaign_criterion.keyword.text or ""),
+                            match_type=_proto_enum_name(getattr(r.campaign_criterion.keyword, "match_type", None)),
+                        )
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error listing negative keywords for {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            x.level,
+            (x.campaign_name or "").lower(),
+            (x.ad_group_name or "").lower(),
+            (x.keyword_text or "").lower(),
+        )
+    )
+    return out
+
+
+def get_ad_group_metrics_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+) -> List[AdGroupPeriodMetricsRow]:
+    dr = normalize_mcp_date_range(date_range)
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM ad_group
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[AdGroupPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[str, Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    ag_id = str(r.ad_group.id)
+                    if ag_id not in acc:
+                        acc[ag_id] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_id": str(r.campaign.id),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[ag_id]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            for ag_id, a in acc.items():
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    AdGroupPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=a["campaign_id"],
+                        campaign_name=a["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=a["ad_group_name"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (ad_group) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.campaign_name or "").lower(),
+            (x.ad_group_name or "").lower(),
+            x.ad_group_id,
+        )
+    )
+    return out
+
+
+def get_ad_performance_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit_per_customer: int = 200,
+) -> List[AdPeriodMetricsRow]:
+    """Metrics theo từng ad (ad_group_ad), gộp kỳ; top theo cost."""
+    dr = normalize_mcp_date_range(date_range)
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 2000:
+        limit_per_customer = 2000
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_ad.ad.id,
+          ad_group_ad.ad.name,
+          ad_group_ad.ad.type,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM ad_group_ad
+        WHERE segments.date DURING {dr}
+          AND ad_group_ad.status IN (ENABLED, PAUSED)
+    """.strip()
+
+    out: List[AdPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    ag_id = str(r.ad_group.id)
+                    ad = r.ad_group_ad.ad
+                    ad_id = str(ad.id) if getattr(ad, "id", None) else ""
+                    key = (cap_id, ag_id, ad_id)
+                    ad_name = str(getattr(ad, "name", "") or "")
+                    ad_type = _proto_enum_name(getattr(ad, "type_", None))
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": str(r.customer.id),
+                            "customer_name": str(r.customer.descriptive_name or ""),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "ad_name": ad_name,
+                            "ad_type": ad_type,
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[key]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            for (cap_id, ag_id, ad_id), a in ranked:
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    AdPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        customer_name=a["customer_name"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=a["ad_group_name"],
+                        ad_id=ad_id,
+                        ad_name=a["ad_name"],
+                        ad_type=a["ad_type"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (ad_group_ad) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(key=lambda x: ((x.campaign_name or "").lower(), (x.ad_group_name or "").lower(), x.ad_id))
+    return out
+
+
+def get_keyword_quality_scores_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+) -> List[KeywordQualityPeriodRow]:
+    """
+    Quality score lịch sử (keyword_view + segments.date).
+    Với mỗi keyword lấy bản ghi có segments.date mới nhất trong kỳ.
+    """
+    dr = normalize_mcp_date_range(date_range)
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          segments.date,
+          customer.id,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          metrics.historical_quality_score,
+          metrics.historical_creative_quality_score,
+          metrics.historical_landing_page_quality_score
+        FROM keyword_view
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[KeywordQualityPeriodRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        best: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    ag_id = str(r.ad_group.id)
+                    crit_id = str(r.ad_group_criterion.criterion_id)
+                    key = (cap_id, ag_id, crit_id)
+                    seg_date = str(r.segments.date) if r.segments.date else ""
+                    prev = best.get(key)
+                    if prev is None or seg_date > prev["segment_date"]:
+                        best[key] = {
+                            "segment_date": seg_date,
+                            "customer_id": str(r.customer.id),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "keyword_text": str(r.ad_group_criterion.keyword.text or ""),
+                            "match_type": _proto_enum_name(getattr(r.ad_group_criterion.keyword, "match_type", None)),
+                            "hq": _proto_enum_name(getattr(r.metrics, "historical_quality_score", None)),
+                            "hc": _proto_enum_name(getattr(r.metrics, "historical_creative_quality_score", None)),
+                            "hl": _proto_enum_name(getattr(r.metrics, "historical_landing_page_quality_score", None)),
+                        }
+            for (cap_id, ag_id, crit_id), b in best.items():
+                out.append(
+                    KeywordQualityPeriodRow(
+                        customer_id=b["customer_id"],
+                        campaign_id=cap_id,
+                        campaign_name=b["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=b["ad_group_name"],
+                        criterion_id=crit_id,
+                        keyword_text=b["keyword_text"],
+                        match_type=b["match_type"],
+                        date_range=dr,
+                        latest_segment_date=b["segment_date"],
+                        historical_quality_score=b["hq"],
+                        historical_creative_quality_score=b["hc"],
+                        historical_landing_page_quality_score=b["hl"],
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (keyword quality) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.campaign_name or "").lower(),
+            (x.ad_group_name or "").lower(),
+            (x.keyword_text or "").lower(),
+        )
+    )
+    return out
+
+
+def get_audience_performance_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit_per_customer: int = 300,
+) -> List[AudiencePeriodMetricsRow]:
+    dr = normalize_mcp_date_range(date_range)
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 2000:
+        limit_per_customer = 2000
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.display_name,
+          ad_group_criterion.type,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM ad_group_audience_view
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[AudiencePeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    ag_id = str(r.ad_group.id)
+                    crit_id = str(r.ad_group_criterion.criterion_id)
+                    key = (cap_id, ag_id, crit_id)
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": str(r.customer.id),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "ad_group_name": str(r.ad_group.name or ""),
+                            "display_name": str(r.ad_group_criterion.display_name or ""),
+                            "crit_type": _proto_enum_name(getattr(r.ad_group_criterion, "type_", None)),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[key]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            for (cap_id, ag_id, crit_id), a in ranked:
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    AudiencePeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        ad_group_id=ag_id,
+                        ad_group_name=a["ad_group_name"],
+                        criterion_id=crit_id,
+                        audience_display_name=a["display_name"],
+                        criterion_type=a["crit_type"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (ad_group_audience_view) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(key=lambda x: ((x.campaign_name or "").lower(), (x.audience_display_name or "").lower()))
+    return out
+
+
+def get_asset_performance_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit_per_customer: int = 300,
+) -> List[AssetPeriodMetricsRow]:
+    dr = normalize_mcp_date_range(date_range)
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 2000:
+        limit_per_customer = 2000
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset.id,
+          asset.name,
+          asset.type,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM asset_group_asset
+        WHERE segments.date DURING {dr}
+    """.strip()
+
+    out: List[AssetPeriodMetricsRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    agroup_id = str(r.asset_group.id)
+                    asset_id = str(r.asset.id)
+                    key = (cap_id, agroup_id, asset_id)
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": str(r.customer.id),
+                            "campaign_name": str(r.campaign.name or ""),
+                            "asset_group_name": str(r.asset_group.name or ""),
+                            "asset_name": str(r.asset.name or ""),
+                            "asset_type": _proto_enum_name(getattr(r.asset, "type_", None)),
+                            "clicks": 0,
+                            "impressions": 0,
+                            "cost_micros": 0,
+                            "conversions": 0.0,
+                        }
+                    a = acc[key]
+                    a["clicks"] += int(r.metrics.clicks or 0)
+                    a["impressions"] += int(r.metrics.impressions or 0)
+                    a["cost_micros"] += int(r.metrics.cost_micros or 0)
+                    a["conversions"] += float(r.metrics.conversions or 0.0)
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            for (cap_id, agroup_id, asset_id), a in ranked:
+                cost = a["cost_micros"] / 1_000_000.0
+                conv = float(a["conversions"])
+                out.append(
+                    AssetPeriodMetricsRow(
+                        customer_id=a["customer_id"],
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        asset_group_id=agroup_id,
+                        asset_group_name=a["asset_group_name"],
+                        asset_id=asset_id,
+                        asset_name=a["asset_name"],
+                        asset_type=a["asset_type"],
+                        date_range=dr,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=float(cost),
+                        conversions=conv,
+                        cpa=_cpa_from_cost_and_conversions(cost, conv),
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (asset_group_asset) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(key=lambda x: ((x.campaign_name or "").lower(), (x.asset_group_name or "").lower(), x.asset_id))
+    return out
+
+
+def get_change_events_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str,
+    *,
+    limit: int = 500,
+) -> List[ChangeEventRow]:
+    """
+    Lịch sử thay đổi (change_event). Google giới hạn truy vấn ~30 ngày gần nhất.
+    """
+    dr = normalize_mcp_date_range(date_range)
+    if limit < 1:
+        limit = 1
+    limit = min(limit, 10000)
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          change_event.change_date_time,
+          change_event.change_resource_type,
+          change_event.user_email,
+          change_event.client_type,
+          change_event.resource_name,
+          change_event.changed_fields
+        FROM change_event
+        WHERE change_event.change_date_time DURING {dr}
+        ORDER BY change_event.change_date_time DESC
+        LIMIT {int(limit)}
+    """.strip()
+
+    out: List[ChangeEventRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    ce = r.change_event
+                    cf = getattr(ce, "changed_fields", None)
+                    changed = ""
+                    if cf is not None:
+                        paths = getattr(cf, "paths", None)
+                        if paths:
+                            changed = ",".join(str(p) for p in paths)
+                        else:
+                            changed = str(cf)
+                    out.append(
+                        ChangeEventRow(
+                            change_date_time=str(ce.change_date_time or ""),
+                            change_resource_type=_proto_enum_name(getattr(ce, "change_resource_type", None)),
+                            user_email=str(ce.user_email or ""),
+                            client_type=_proto_enum_name(getattr(ce, "client_type", None)),
+                            resource_name=str(ce.resource_name or ""),
+                            changed_fields=changed,
+                        )
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (change_event) for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+    return out
+
+
 def get_yesterday_customer_performance(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
@@ -401,59 +1737,18 @@ def get_yesterday_customer_performance(
     - `FROM customer` returns account-level aggregated metrics.
     - `segments.date DURING YESTERDAY` scopes the metrics to exactly yesterday.
     """
-    ga_service = client.get_service("GoogleAdsService")
-
-    query = """
-        SELECT
-          customer.id,
-          customer.descriptive_name,
-          metrics.clicks,
-          metrics.impressions,
-          metrics.cost_micros,
-          metrics.conversions
-        FROM customer
-        WHERE segments.date DURING YESTERDAY
-    """.strip()
-
-    rows: List[CustomerPerformanceRow] = []
-    for cid in customer_ids:
-        cid = str(cid).strip().replace("-", "")
-        if not cid:
-            continue
-        try:
-            # SearchStream streams responses; we aggregate the single row for the account/date.
-            stream = ga_service.search_stream(customer_id=cid, query=query)
-            found_any = False
-            for batch in stream:
-                for r in batch.results:
-                    found_any = True
-                    cost = (r.metrics.cost_micros or 0) / 1_000_000.0
-                    rows.append(
-                        CustomerPerformanceRow(
-                            customer_id=str(r.customer.id),
-                            customer_name=str(r.customer.descriptive_name or ""),
-                            clicks=int(r.metrics.clicks or 0),
-                            impressions=int(r.metrics.impressions or 0),
-                            cost=float(cost),
-                            conversions=float(r.metrics.conversions or 0.0),
-                        )
-                    )
-            if not found_any:
-                rows.append(
-                    CustomerPerformanceRow(
-                        customer_id=cid,
-                        customer_name="",
-                        clicks=0,
-                        impressions=0,
-                        cost=0.0,
-                        conversions=0.0,
-                    )
-                )
-        except GoogleAdsException as ex:
-            raise GoogleAdsHelperError(f"Google Ads API error for customer {cid}:\n{_format_googleads_exception(ex)}") from ex
-        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
-            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
-    return rows
+    period = get_customer_metrics_for_date_range(client, customer_ids, "YESTERDAY")
+    return [
+        CustomerPerformanceRow(
+            customer_id=p.customer_id,
+            customer_name=p.customer_name,
+            clicks=p.clicks,
+            impressions=p.impressions,
+            cost=p.cost,
+            conversions=p.conversions,
+        )
+        for p in period
+    ]
 
 
 def get_yesterday_campaign_performance(
@@ -467,59 +1762,20 @@ def get_yesterday_campaign_performance(
     - `FROM campaign` + `segments.date DURING YESTERDAY` — metrics gắn với campaign + ngày.
     - Chỉ chiến dịch đang bật hoặc tạm dừng (bỏ REMOVED / không còn dùng).
     """
-    ga_service = client.get_service("GoogleAdsService")
-    query = """
-        SELECT
-          customer.id,
-          customer.descriptive_name,
-          campaign.id,
-          campaign.name,
-          metrics.clicks,
-          metrics.impressions,
-          metrics.cost_micros,
-          metrics.conversions
-        FROM campaign
-        WHERE segments.date DURING YESTERDAY
-          AND campaign.status IN (ENABLED, PAUSED)
-    """.strip()
-
-    rows: List[CampaignPerformanceRow] = []
-    for cid in customer_ids:
-        cid = str(cid).strip().replace("-", "")
-        if not cid:
-            continue
-        try:
-            stream = ga_service.search_stream(customer_id=cid, query=query)
-            for batch in stream:
-                for r in batch.results:
-                    cost = (r.metrics.cost_micros or 0) / 1_000_000.0
-                    rows.append(
-                        CampaignPerformanceRow(
-                            customer_id=str(r.customer.id),
-                            customer_name=str(r.customer.descriptive_name or ""),
-                            campaign_id=str(r.campaign.id),
-                            campaign_name=str(r.campaign.name or ""),
-                            clicks=int(r.metrics.clicks or 0),
-                            impressions=int(r.metrics.impressions or 0),
-                            cost=float(cost),
-                            conversions=float(r.metrics.conversions or 0.0),
-                        )
-                    )
-        except GoogleAdsException as ex:
-            raise GoogleAdsHelperError(
-                f"Google Ads API error for customer {cid}:\n{_format_googleads_exception(ex)}"
-            ) from ex
-        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
-            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
-
-    rows.sort(
-        key=lambda x: (
-            (x.customer_name or "").lower(),
-            (x.campaign_name or "").lower(),
-            x.campaign_id,
+    period = get_campaign_metrics_for_date_range(client, customer_ids, "YESTERDAY")
+    return [
+        CampaignPerformanceRow(
+            customer_id=p.customer_id,
+            customer_name=p.customer_name,
+            campaign_id=p.campaign_id,
+            campaign_name=p.campaign_name,
+            clicks=p.clicks,
+            impressions=p.impressions,
+            cost=p.cost,
+            conversions=p.conversions,
         )
-    )
-    return rows
+        for p in period
+    ]
 
 
 def list_campaigns_for_customers(
@@ -595,78 +1851,27 @@ def get_yesterday_keyword_performance(
     Chỉ số ngày hôm qua theo keyword (Search / mạng có keyword_view).
     Giới hạn số dòng / tài khoản để tránh payload quá lớn.
     """
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 5000:
-        limit_per_customer = 5000
-
-    ga_service = client.get_service("GoogleAdsService")
-    rows: List[KeywordPerformanceRow] = []
-
-    for cid in customer_ids:
-        cid = str(cid).strip().replace("-", "")
-        if not cid:
-            continue
-        query = f"""
-            SELECT
-              customer.id,
-              customer.descriptive_name,
-              campaign.id,
-              campaign.name,
-              ad_group.id,
-              ad_group.name,
-              ad_group_criterion.criterion_id,
-              ad_group_criterion.keyword.text,
-              ad_group_criterion.keyword.match_type,
-              metrics.clicks,
-              metrics.impressions,
-              metrics.cost_micros,
-              metrics.conversions
-            FROM keyword_view
-            WHERE segments.date DURING YESTERDAY
-            ORDER BY metrics.cost_micros DESC
-            LIMIT {int(limit_per_customer)}
-        """.strip()
-        try:
-            stream = ga_service.search_stream(customer_id=cid, query=query)
-            for batch in stream:
-                for r in batch.results:
-                    mt = ""
-                    if r.ad_group_criterion.keyword.match_type:
-                        mt = r.ad_group_criterion.keyword.match_type.name
-                    cost = (r.metrics.cost_micros or 0) / 1_000_000.0
-                    rows.append(
-                        KeywordPerformanceRow(
-                            customer_id=str(r.customer.id),
-                            customer_name=str(r.customer.descriptive_name or ""),
-                            campaign_id=str(r.campaign.id),
-                            campaign_name=str(r.campaign.name or ""),
-                            ad_group_id=str(r.ad_group.id),
-                            ad_group_name=str(r.ad_group.name or ""),
-                            criterion_id=str(r.ad_group_criterion.criterion_id),
-                            keyword_text=str(r.ad_group_criterion.keyword.text or ""),
-                            match_type=mt,
-                            clicks=int(r.metrics.clicks or 0),
-                            impressions=int(r.metrics.impressions or 0),
-                            cost=float(cost),
-                            conversions=float(r.metrics.conversions or 0.0),
-                        )
-                    )
-        except GoogleAdsException as ex:
-            raise GoogleAdsHelperError(
-                f"Google Ads API error for keyword_view customer {cid}:\n{_format_googleads_exception(ex)}"
-            ) from ex
-        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
-            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
-
-    rows.sort(
-        key=lambda x: (
-            (x.customer_name or "").lower(),
-            (x.campaign_name or "").lower(),
-            (x.keyword_text or "").lower(),
-        )
+    period = get_keyword_metrics_for_date_range(
+        client, customer_ids, "YESTERDAY", limit_per_customer=limit_per_customer
     )
-    return rows
+    return [
+        KeywordPerformanceRow(
+            customer_id=p.customer_id,
+            customer_name=p.customer_name,
+            campaign_id=p.campaign_id,
+            campaign_name=p.campaign_name,
+            ad_group_id=p.ad_group_id,
+            ad_group_name=p.ad_group_name,
+            criterion_id=p.criterion_id,
+            keyword_text=p.keyword_text,
+            match_type=p.match_type,
+            clicks=p.clicks,
+            impressions=p.impressions,
+            cost=p.cost,
+            conversions=p.conversions,
+        )
+        for p in period
+    ]
 
 
 def create_performance_max_campaign_for_local_leads(

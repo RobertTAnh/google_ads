@@ -7,6 +7,8 @@ Chạy từ thư mục gốc repo:
 Biến môi trường:
   GOOGLE_ADS_MCP_BASE_URL  ví dụ https://your-app.up.railway.app  (không có / cuối)
   MCP_API_KEY              trùng với MCP_API_KEY trên server Flask
+
+Tham số date_range (GAQL): YESTERDAY | LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS
 """
 
 from __future__ import annotations
@@ -21,11 +23,13 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP(
     "Google Ads (HTTP bridge)",
     instructions=(
-        "Tools gọi API Google Ads qua server đã deploy. "
-        "Luôn có `customer_id` (CID tài khoản con 10 chữ số). "
-        "Khi có nhiều MCC trong GOOGLE_ADS_MCC_CONFIGS, truyền `mcc_id` (MCC 10 chữ số)."
+        "Tools gọi Google Ads qua server deploy. Bắt buộc customer_id (CID 10 số). "
+        "date_range: YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS (GAQL). "
+        "Nhiều MCC: truyền mcc_id. CPA trong JSON = cost/conversions khi có conversion."
     ),
 )
+
+_HTTP_TIMEOUT = httpx.Timeout(180.0, connect=30.0)
 
 
 def _base_url() -> str:
@@ -54,7 +58,7 @@ def _get(path: str, params: Optional[dict[str, Any]] = None) -> str:
             url,
             params=params,
             headers={"X-MCP-API-Key": key},
-            timeout=httpx.Timeout(120.0, connect=30.0),
+            timeout=_HTTP_TIMEOUT,
         )
         return r.text
     except httpx.HTTPError as e:
@@ -63,7 +67,7 @@ def _get(path: str, params: Optional[dict[str, Any]] = None) -> str:
 
 @mcp.tool()
 def ads_mcp_health() -> str:
-    """Kiểm tra server HTTP MCP (không cần API key trên một số bản triển khai). Trả JSON."""
+    """Kiểm tra server HTTP MCP; JSON gồm allowed_date_ranges."""
     base = _base_url()
     if not base:
         return json.dumps({"ok": False, "error": "Chưa set GOOGLE_ADS_MCP_BASE_URL"}, ensure_ascii=False)
@@ -76,34 +80,198 @@ def ads_mcp_health() -> str:
 
 @mcp.tool()
 def ads_list_child_accounts(mcc_id: str = "") -> str:
-    """Liệt kê tài khoản con dưới MCC. `mcc_id` 10 chữ số; để trống nếu server chỉ có một MCC mặc định."""
+    """Liệt kê tài khoản con dưới MCC."""
     return _get("/mcp/v1/child_accounts", {"mcc_id": mcc_id or None})
 
 
 @mcp.tool()
 def ads_list_campaigns(customer_id: str, mcc_id: str = "") -> str:
-    """Danh sách chiến dịch (id, tên, trạng thái, loại kênh) cho tài khoản con `customer_id`."""
+    """Danh sách chiến dịch (metadata: trạng thái, loại kênh), không theo kỳ ngày."""
     return _get("/mcp/v1/list_campaigns", {"customer_id": customer_id, "mcc_id": mcc_id or None})
 
 
 @mcp.tool()
-def ads_campaign_performance_yesterday(customer_id: str, mcc_id: str = "") -> str:
-    """Hiệu suất theo chiến dịch — ngày hôm qua (theo múi giờ tài khoản Google Ads)."""
-    return _get("/mcp/v1/campaign_performance", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+def ads_customer_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "YESTERDAY",
+) -> str:
+    """Tổng metrics cấp tài khoản trong kỳ + CPA (cost/conversions)."""
+    return _get(
+        "/mcp/v1/customer_performance",
+        {"customer_id": customer_id, "mcc_id": mcc_id or None, "date_range": date_range},
+    )
 
 
 @mcp.tool()
-def ads_customer_performance_yesterday(customer_id: str, mcc_id: str = "") -> str:
-    """Hiệu suất cấp tài khoản — ngày hôm qua (tổng clicks, impressions, cost, conversions)."""
-    return _get("/mcp/v1/customer_performance", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+def ads_campaign_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "YESTERDAY",
+) -> str:
+    """Metrics gộp theo từng chiến dịch (ENABLED+PAUSED) trong kỳ + CPA."""
+    return _get(
+        "/mcp/v1/campaign_performance",
+        {"customer_id": customer_id, "mcc_id": mcc_id or None, "date_range": date_range},
+    )
 
 
 @mcp.tool()
-def ads_keyword_performance_yesterday(customer_id: str, mcc_id: str = "", limit: int = 500) -> str:
-    """Hiệu suất theo từ khóa — ngày hôm qua (Search / keyword_view). `limit` tối đa mặc định 500."""
+def ads_keyword_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "YESTERDAY",
+    limit: int = 500,
+) -> str:
+    """Top keyword (keyword_view) theo cost trong kỳ; Search-heavy."""
     return _get(
         "/mcp/v1/keyword_performance",
-        {"customer_id": customer_id, "mcc_id": mcc_id or None, "limit": str(limit)},
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
+    )
+
+
+@mcp.tool()
+def ads_search_term_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    limit: int = 400,
+) -> str:
+    """Cụm từ tìm kiếm thực tế (search_term_view), top theo cost; mặc định 7 ngày."""
+    return _get(
+        "/mcp/v1/search_term_performance",
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
+    )
+
+
+@mcp.tool()
+def ads_campaign_budget_metrics(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_30_DAYS",
+) -> str:
+    """Mỗi campaign: ngân sách ngày (xấp xỉ) + cost/clicks/impressions/conversions/CPA trong kỳ."""
+    return _get(
+        "/mcp/v1/campaign_budget_metrics",
+        {"customer_id": customer_id, "mcc_id": mcc_id or None, "date_range": date_range},
+    )
+
+
+@mcp.tool()
+def ads_get_ad_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    limit: int = 200,
+) -> str:
+    """Theo từng quảng cáo (ad_group_ad): type, cost, clicks, conv, CPA — top theo cost."""
+    return _get(
+        "/mcp/v1/ad_performance",
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
+    )
+
+
+@mcp.tool()
+def ads_get_negative_keywords(customer_id: str, mcc_id: str = "") -> str:
+    """Từ khóa phủ định (campaign + ad group), cấu hình hiện tại; không phụ thuộc date_range."""
+    return _get("/mcp/v1/negative_keywords", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+
+
+@mcp.tool()
+def ads_get_ad_group_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+) -> str:
+    """Metrics gộp theo nhóm quảng cáo trong kỳ + CPA."""
+    return _get(
+        "/mcp/v1/ad_group_performance",
+        {"customer_id": customer_id, "mcc_id": mcc_id or None, "date_range": date_range},
+    )
+
+
+@mcp.tool()
+def ads_get_keyword_quality_score(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_30_DAYS",
+) -> str:
+    """Quality score lịch sử (bucket) theo keyword; bản ghi segments.date mới nhất trong kỳ."""
+    return _get(
+        "/mcp/v1/keyword_quality_score",
+        {"customer_id": customer_id, "mcc_id": mcc_id or None, "date_range": date_range},
+    )
+
+
+@mcp.tool()
+def ads_get_audience_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    limit: int = 300,
+) -> str:
+    """Đối tượng (ad_group_audience_view): display_name, type, metrics, CPA; top theo cost."""
+    return _get(
+        "/mcp/v1/audience_performance",
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
+    )
+
+
+@mcp.tool()
+def ads_get_asset_performance(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_30_DAYS",
+    limit: int = 300,
+) -> str:
+    """Asset trong asset group (PMax…): type, metrics, CPA; top theo cost."""
+    return _get(
+        "/mcp/v1/asset_performance",
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
+    )
+
+
+@mcp.tool()
+def ads_get_change_history(
+    customer_id: str,
+    mcc_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    limit: int = 500,
+) -> str:
+    """Lịch sử thay đổi (change_event): thời điểm, loại resource, user, field đổi."""
+    return _get(
+        "/mcp/v1/change_history",
+        {
+            "customer_id": customer_id,
+            "mcc_id": mcc_id or None,
+            "date_range": date_range,
+            "limit": str(limit),
+        },
     )
 
 

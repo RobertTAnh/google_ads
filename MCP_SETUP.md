@@ -30,13 +30,25 @@ Các route dữ liệu cần header:
 
 Query thường dùng:
 
+- **`date_range`** (GAQL, chung cho các route metrics): `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua. Giá trị hợp lệ xem thêm trong `GET /mcp/v1/health` → `allowed_date_ranges`.
+- **`cpa`** trong JSON: `cost / conversions` khi có conversion; không có conversion thì `null`.
+
 | Mục đích | Method | Path | Query |
 |----------|--------|------|--------|
-| Tài khoản con dưới MCC | GET | `/mcp/v1/child_accounts` | `mcc_id` (tuỳ chọn nếu có MCC mặc định) |
-| Danh sách chiến dịch | GET | `/mcp/v1/list_campaigns` | `customer_id`, `mcc_id?` |
-| Performance theo campaign (hôm qua) | GET | `/mcp/v1/campaign_performance` | `customer_id`, `mcc_id?` |
-| Performance cấp tài khoản (hôm qua) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?` |
-| Performance theo keyword (hôm qua) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `limit?` (mặc định 500) |
+| Tài khoản con dưới MCC | GET | `/mcp/v1/child_accounts` | `mcc_id?` |
+| Danh sách chiến dịch (metadata) | GET | `/mcp/v1/list_campaigns` | `customer_id`, `mcc_id?` |
+| Metrics theo campaign (gộp kỳ + CPA) | GET | `/mcp/v1/campaign_performance` | `customer_id`, `mcc_id?`, `date_range?` |
+| Metrics cấp tài khoản (gộp kỳ + CPA) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?`, `date_range?` |
+| Top keyword theo cost (gộp kỳ) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500) |
+| Top cụm từ tìm kiếm thực tế (gộp kỳ) | GET | `/mcp/v1/search_term_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 400) |
+| Campaign + ngân sách ngày + metrics kỳ + CPA | GET | `/mcp/v1/campaign_budget_metrics` | `customer_id`, `mcc_id?`, `date_range?` |
+| Quảng cáo (ad) + metrics kỳ | GET | `/mcp/v1/ad_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 200) |
+| Từ khóa phủ định (snapshot) | GET | `/mcp/v1/negative_keywords` | `customer_id`, `mcc_id?` (`date_range` không dùng) |
+| Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
+| Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |
+| Đối tượng (audience) + metrics kỳ | GET | `/mcp/v1/audience_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
+| Asset (asset group) + metrics kỳ | GET | `/mcp/v1/asset_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
+| Lịch sử thay đổi (change_event) | GET | `/mcp/v1/change_history` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500, tối đa 10000) |
 
 `customer_id` / `mcc_id`: **10 chữ số** (có thể gõ dạng `123-456-7890`).
 
@@ -80,7 +92,7 @@ Thêm (hoặc gộp vào `mcpServers`) mục ví dụ — **sửa `cwd` và URL*
 }
 ```
 
-Khởi động lại Claude Desktop. Trong chat, thử nhờ Claude dùng tool **`ads_list_child_accounts`** rồi **`ads_campaign_performance_yesterday`** với `customer_id` thật.
+Khởi động lại Claude Desktop. Trong chat, thử nhờ Claude dùng **`ads_list_child_accounts`**, **`ads_campaign_performance`** (`date_range` = `LAST_7_DAYS` hoặc `LAST_30_DAYS`), **`ads_search_term_performance`**, **`ads_campaign_budget_metrics`** với `customer_id` thật.
 
 ---
 

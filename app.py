@@ -1157,7 +1157,6 @@ def create_app() -> Flask:
         app,
         build_google_ads_client_for_mcc=_build_google_ads_client_for_mcc,
         normalize_customer_id=_normalize_customer_id,
-        local_yesterday_iso=_local_yesterday_iso,
         default_mcc_id=default_mcc_id,
     )
 
