@@ -1873,7 +1873,6 @@ def _target_cpa_from_campaign_proto(campaign: Any) -> Optional[float]:
     for attr in (
         "maximize_conversions",
         "target_cpa",
-        "manual_cpa",
     ):
         scheme = getattr(campaign, attr, None)
         if scheme is None:
@@ -1987,7 +1986,6 @@ def list_campaign_bidding_for_customers(
           campaign.bidding_strategy,
           campaign.maximize_conversions.target_cpa_micros,
           campaign.target_cpa.target_cpa_micros,
-          campaign.manual_cpa.target_cpa_micros,
           campaign.target_roas.target_roas,
           campaign.maximize_conversion_value.target_roas
         FROM campaign
