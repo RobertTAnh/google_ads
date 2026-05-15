@@ -20,7 +20,7 @@ This example works with both web and desktop app OAuth client ID types.
 
 https://console.cloud.google.com
 
-IMPORTANT: For web app clients types, you must add "http://127.0.0.1" to the
+IMPORTANT: For web app clients types, you must add "http://127.0.0.1:8080" to the
 "Authorized redirect URIs" list in your Google Cloud Console project before
 running this example. Desktop app client types do not require the local
 redirect to be explicitly configured in the console.
@@ -36,9 +36,10 @@ import argparse
 import hashlib
 import os
 import re
+import webbrowser
 import socket
 import sys
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 # If using Web flow, the redirect URL must match exactly what’s configured in GCP for
 # the OAuth client.  If using Desktop flow, the redirect must be a localhost URL and
@@ -67,24 +68,30 @@ def main(client_secrets_path: str, scopes: List[str]) -> None:
     # https://developers.google.com/identity/protocols/OpenIDConnect#createxsrftoken
     passthrough_val = hashlib.sha256(os.urandom(1024)).hexdigest()
 
-    authorization_url, state = flow.authorization_url(
+    authorization_url, expected_state = flow.authorization_url(
         access_type="offline",
         state=passthrough_val,
         prompt="consent",
         include_granted_scopes="true",
     )
 
-    # Prints the authorization URL so you can paste into your browser. In a
-    # typical web application you would redirect the user to this URL, and they
-    # would be redirected back to "redirect_url" provided earlier after
-    # granting permission.
-    print("Paste this URL into your browser: ")
+    # Open default browser when possible; always print URL for copy-paste.
+    print("Opening your browser for Google sign-in (or paste the URL below):\n")
     print(authorization_url)
+    try:
+        opened = webbrowser.open(authorization_url)
+        if not opened:
+            print(
+                "\nCould not launch a browser automatically — paste the URL above manually."
+            )
+    except Exception as exc:
+        print(f"\nCould not launch browser ({exc}) — paste the URL above manually.")
     print(f"\nWaiting for authorization and callback to: {_REDIRECT_URI}")
 
     # Retrieves an authorization code by opening a socket to receive the
     # redirect request and parsing the query parameters set in the URL.
-    code = unquote(get_authorization_code(passthrough_val))
+    # Use state returned by the library (must match the ``state=`` in the auth URL).
+    code = unquote(get_authorization_code(expected_state))
 
     # Pass the code back into the OAuth module to get a refresh token.
     flow.fetch_token(code=code)
@@ -98,61 +105,101 @@ def main(client_secrets_path: str, scopes: List[str]) -> None:
     )
 
 
-def get_authorization_code(passthrough_val: str) -> str:
-    """Opens a socket to handle a single HTTP request containing auth tokens.
+def _recv_request_headers_prefix(connection: socket.socket, max_bytes: int = 262144) -> bytes:
+    """Read until end of first line (at least ``\\r\\n``) so long ``code=`` values are not truncated."""
+    buf = b""
+    while len(buf) < max_bytes:
+        chunk = connection.recv(8192)
+        if not chunk:
+            break
+        buf += chunk
+        if b"\r\n" in buf:
+            break
+    return buf
+
+
+def get_authorization_code(expected_state: str) -> str:
+    """Opens a socket to handle HTTP requests until the OAuth redirect arrives.
+
+    Browsers often hit ``/favicon.ico`` (or other probes) before Google's
+    redirect to ``/?code=...``; those requests are ignored so parsing does not
+    fail with ``AttributeError``.
 
     Args:
-        passthrough_val: an anti-forgery token used to verify the request
-          received by the socket.
+        expected_state: CSRF ``state`` returned by ``flow.authorization_url`` (must
+            match the ``state`` query param on the redirect).
 
     Returns:
-        a str access token from the Google Auth service.
+        Authorization ``code`` query string from the Google Auth service.
     """
-    # Open a socket at _SERVER:_PORT and listen for a request
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((_SERVER, _PORT))
-    sock.listen(1)
-    connection, address = sock.accept()
-    data = connection.recv(1024)
-    # Parse the raw request to retrieve the URL query parameters.
-    params = parse_raw_query_params(data)
-
+    sock.listen(8)
+    message = "Authorization code was successfully retrieved."
+    params: Dict[str, str] = {}
     try:
-        if not params.get("code"):
-            # If no code is present in the query params then there will be an
-            # error message with more details.
-            error = params.get("error")
-            message = f"Failed to retrieve authorization code. Error: {error}"
-            raise ValueError(message)
-        elif params.get("state") != passthrough_val:
-            message = "State token does not match the expected state."
-            raise ValueError(message)
-        else:
+        while True:
+            connection, address = sock.accept()
+            data = _recv_request_headers_prefix(connection)
+            params = parse_raw_query_params(data)
+            if params.get("code") or params.get("error"):
+                break
+            # Not the OAuth callback (e.g. favicon) — close and wait for redirect.
+            try:
+                connection.sendall(
+                    b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+                )
+            except OSError:
+                pass
+            connection.close()
+
+        try:
+            if not params.get("code"):
+                error = params.get("error")
+                message = f"Failed to retrieve authorization code. Error: {error}"
+                raise ValueError(message)
+            if params.get("state") != expected_state:
+                message = (
+                    "State token does not match. Close every Google sign-in tab, "
+                    "run this script again, and only complete login using the new URL "
+                    "(do not reuse an old authorization link)."
+                )
+                raise ValueError(message)
             message = "Authorization code was successfully retrieved."
-    except ValueError as error:
-        print(error)
-        sys.exit(1)
-    finally:
+        except ValueError as error:
+            print(error)
+            response = (
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                "Connection: close\r\n\r\n"
+                f"<b>{message}</b>"
+                "<p>Please check the console output.</p>\n"
+            )
+            connection.sendall(response.encode())
+            connection.close()
+            sys.exit(1)
+
         response = (
-            "HTTP/1.1 200 OK\n"
-            "Content-Type: text/html\n\n"
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Connection: close\r\n\r\n"
             f"<b>{message}</b>"
             "<p>Please check the console output.</p>\n"
         )
-
         connection.sendall(response.encode())
         connection.close()
+    finally:
+        sock.close()
 
-    return params.get("code")
+    return params["code"]
 
 
 def parse_raw_query_params(data: bytes) -> Dict[str, str]:
-    """Parses a raw HTTP request to extract its query params as a dict.
+    """Parses the first line of a raw HTTP GET to extract ``/?...`` query params.
 
-    Note that this logic is likely irrelevant if you're building OAuth logic
-    into a complete web application, where response parsing is handled by a
-    framework.
+    Returns an empty dict if this is not a GET with a query string (e.g.
+    ``GET /favicon.ico``).
 
     Args:
         data: raw request data as bytes.
@@ -160,15 +207,14 @@ def parse_raw_query_params(data: bytes) -> Dict[str, str]:
     Returns:
         a dict of query parameter key value pairs.
     """
-    # Decode the request into a utf-8 encoded string
-    decoded = data.decode("utf-8")
-    # Use a regular expression to extract the URL query parameters string
-    match = re.search(r"GET\s\/\?(.*) ", decoded)
-    params = match.group(1)
-    # Split the parameters to isolate the key/value pairs
-    pairs = [pair.split("=") for pair in params.split("&")]
-    # Convert pairs to a dict to make it easy to access the values
-    return {key: val for key, val in pairs}
+    decoded = data.decode("utf-8", errors="replace")
+    first_line = decoded.split("\r\n", 1)[0]
+    match = re.match(r"GET\s+/\?([^\s]+)\s+HTTP/", first_line)
+    if not match:
+        return {}
+    qs = match.group(1)
+    parsed = parse_qs(qs, keep_blank_values=True)
+    return {k: (v[0] if v else "") for k, v in parsed.items()}
 
 
 if __name__ == "__main__":
