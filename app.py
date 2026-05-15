@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -10,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -36,11 +37,21 @@ from google_ads_helper import (
 )
 from mcp_api import register_mcp_routes
 from sheets_reporter import push_yesterday_report_to_sheet
+from cid_mcc_store import (
+    delete_mapping,
+    delete_mappings_for_mcc_except_customer_ids,
+    list_mappings,
+    upsert_mapping,
+    upsert_mapping_sync,
+)
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
 _REPORT_SCHEDULER_STARTED = False
 _REPORT_SCHEDULER_START_LOCK = threading.Lock()
+_CID_SYNC_SCHEDULER_STARTED = False
+_CID_SYNC_START_LOCK = threading.Lock()
+_CID_SYNC_LEADER_LOCK_ID = 8104202602
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -392,6 +403,28 @@ def _acquire_scheduler_leader(database_url: str) -> Optional[psycopg.Connection]
         return None
 
 
+def _acquire_cid_sync_leader(database_url: str) -> Optional[psycopg.Connection]:
+    """Khóa advisory riêng (khác report scheduler) để chỉ một instance chạy đồng bộ CID."""
+    conn = psycopg.connect(database_url, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_CID_SYNC_LEADER_LOCK_ID,))
+            ok = bool(cur.fetchone()[0])
+        if ok:
+            return conn
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
+
+
+def _customer_client_map_active(status: str) -> bool:
+    """Chỉ map active=True cho tài khoản còn dùng được (lookup MCP bỏ qua active=False)."""
+    s = (status or "").strip().upper().replace("CUSTOMER_CLIENT_STATUS_", "")
+    return s in ("", "ENABLED", "UNSPECIFIED")
+
+
 def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> None:
     global _REPORT_SCHEDULER_STARTED
     with _REPORT_SCHEDULER_START_LOCK:
@@ -510,6 +543,87 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
     th.start()
 
 
+def _maybe_start_cid_mcc_sync_scheduler(
+    database_url: Optional[str],
+    mcc_ids: List[str],
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+) -> None:
+    """
+    Mỗi CID_SYNC_INTERVAL_SECONDS (mặc định 3600): gọi API list tài khoản con theo từng MCC,
+    chỉ upsert các CID đang bật (ENABLED/…), rồi xóa khỏi DB mọi map cùng mcc_id không còn
+    trong lần quét đó (giữ label tay khi upsert — xem upsert_mapping_sync).
+    """
+    global _CID_SYNC_SCHEDULER_STARTED
+    if not database_url:
+        return
+    raw = (os.getenv("CID_SYNC_ENABLED") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    mids = sorted({_normalize_customer_id(x) for x in mcc_ids if _normalize_customer_id(x)})
+    if not mids:
+        return
+    with _CID_SYNC_START_LOCK:
+        if _CID_SYNC_SCHEDULER_STARTED:
+            return
+        _CID_SYNC_SCHEDULER_STARTED = True
+
+    log = logging.getLogger(__name__)
+
+    def _runner() -> None:
+        interval = max(60, int((os.getenv("CID_SYNC_INTERVAL_SECONDS") or "3600").strip() or 3600))
+        while True:
+            leader_conn: Optional[psycopg.Connection] = None
+            try:
+                leader_conn = _acquire_cid_sync_leader(database_url)
+                if leader_conn is None:
+                    time.sleep(30)
+                    continue
+                for mid in mids:
+                    try:
+                        client = build_google_ads_client_for_mcc(mid)
+                        children = list_child_accounts_under_mcc(client, mid)
+                        active_rows: List[tuple[str, str]] = []
+                        for ch in children:
+                            if not _customer_client_map_active(ch.status):
+                                continue
+                            cid = _normalize_customer_id(ch.customer_id)
+                            if not cid:
+                                continue
+                            active_rows.append((cid, (ch.customer_name or "").strip()))
+                        for cid, name in active_rows:
+                            upsert_mapping_sync(
+                                database_url,
+                                customer_id=cid,
+                                mcc_id=mid,
+                                suggested_label=name,
+                                active=True,
+                            )
+                        delete_mappings_for_mcc_except_customer_ids(
+                            database_url,
+                            mcc_id=mid,
+                            keep_customer_ids=[c for c, _ in active_rows],
+                        )
+                    except Exception as ex:
+                        log.warning("CID↔MCC sync skipped for MCC %s: %s", mid, ex)
+            except Exception:
+                log.exception("CID↔MCC sync loop error")
+            finally:
+                if leader_conn is not None:
+                    try:
+                        with leader_conn.cursor() as cur:
+                            cur.execute("SELECT pg_advisory_unlock(%s)", (_CID_SYNC_LEADER_LOCK_ID,))
+                    except Exception:
+                        pass
+                    try:
+                        leader_conn.close()
+                    except Exception:
+                        pass
+            time.sleep(interval)
+
+    th = threading.Thread(target=_runner, daemon=True, name="cid-mcc-sync")
+    th.start()
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
@@ -531,6 +645,9 @@ def create_app() -> Flask:
         try:
             _init_report_projects_table(database_url)
             _migrate_report_projects_file_to_db(report_projects_file, database_url)
+            from cid_mcc_store import init_customer_mcc_map_table
+
+            init_customer_mcc_map_table(database_url)
         except Exception as ex:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
     _maybe_start_report_scheduler(report_projects_file, database_url or None)
@@ -582,6 +699,11 @@ def create_app() -> Flask:
                 }
             ]
         return []
+
+    mcc_ids_for_cid_sync: List[str] = (
+        list(mcc_configs.keys()) if mcc_configs else ([default_mcc_id] if default_mcc_id else [])
+    )
+    _maybe_start_cid_mcc_sync_scheduler(database_url or None, mcc_ids_for_cid_sync, _build_google_ads_client_for_mcc)
 
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
@@ -1153,11 +1275,61 @@ def create_app() -> Flask:
             flash(str(e), "danger")
             return redirect(url_for("dashboard"))
 
+    @app.get("/cid-mcc-map")
+    def cid_mcc_map_page():
+        if not database_url:
+            flash("Cấu hình DATABASE_URL trên server để lưu map CID→MCC.", "warning")
+            return render_template(
+                "cid_mcc_map.html",
+                rows=[],
+                database_enabled=False,
+                mcc_options=_mcc_options_for_ui(),
+            )
+        rows = list_mappings(database_url)
+        return render_template(
+            "cid_mcc_map.html",
+            rows=rows,
+            database_enabled=True,
+            mcc_options=_mcc_options_for_ui(),
+        )
+
+    @app.post("/cid-mcc-map/add")
+    def cid_mcc_map_add():
+        if not database_url:
+            flash("Thiếu DATABASE_URL.", "danger")
+            return redirect(url_for("cid_mcc_map_page"))
+        cid = _normalize_customer_id(request.form.get("customer_id", ""))
+        mcc = _normalize_customer_id(request.form.get("mcc_id", ""))
+        label = (request.form.get("label") or "").strip()
+        active = (request.form.get("active") or "on").strip().lower() in ("1", "true", "yes", "on")
+        if not cid or not mcc:
+            flash("Cần đủ CID và MCC (10 chữ số).", "warning")
+            return redirect(url_for("cid_mcc_map_page"))
+        try:
+            upsert_mapping(database_url, customer_id=cid, mcc_id=mcc, label=label, active=active)
+            flash("Đã lưu map CID → MCC (MCP sẽ tự resolve khi không truyền mcc_id).", "success")
+        except ValueError as e:
+            flash(str(e), "danger")
+        except Exception as e:
+            flash(f"Lỗi: {e}", "danger")
+        return redirect(url_for("cid_mcc_map_page"))
+
+    @app.post("/cid-mcc-map/delete")
+    def cid_mcc_map_delete():
+        if not database_url:
+            return redirect(url_for("cid_mcc_map_page"))
+        cid = _normalize_customer_id(request.form.get("customer_id", ""))
+        if cid:
+            delete_mapping(database_url, cid)
+            flash("Đã xóa map.", "info")
+        return redirect(url_for("cid_mcc_map_page"))
+
     register_mcp_routes(
         app,
         build_google_ads_client_for_mcc=_build_google_ads_client_for_mcc,
         normalize_customer_id=_normalize_customer_id,
         default_mcc_id=default_mcc_id,
+        database_url=database_url or None,
     )
 
     return app

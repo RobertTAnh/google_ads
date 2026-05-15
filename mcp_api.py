@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from flask import Blueprint, jsonify, request
+
+from cid_mcc_store import lookup_mcc_for_customer
 
 from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
@@ -86,14 +88,28 @@ def register_mcp_routes(
     build_google_ads_client_for_mcc: Callable[[str], Any],
     normalize_customer_id: Callable[[str], str],
     default_mcc_id: str,
+    database_url: Optional[str] = None,
 ) -> None:
     bp = Blueprint("mcp", __name__, url_prefix="/mcp/v1")
 
-    def _resolve_mcc_id() -> str:
+    _MCC_ERR = (
+        "Thiếu MCC: truyền ?mcc_id= hoặc lưu CID→MCC trong DB (bảng customer_mcc_map; "
+        "trang web /cid-mcc-map khi đã cấu hình DATABASE_URL)."
+    )
+
+    def _resolve_mcc_pair(*, use_db_lookup: bool) -> tuple[str, str]:
         raw = (request.args.get("mcc_id") or "").strip()
         if raw:
-            return normalize_customer_id(raw)
-        return normalize_customer_id(default_mcc_id or "")
+            return normalize_customer_id(raw), "query_param"
+        cid = normalize_customer_id(request.args.get("customer_id", "") or "")
+        if use_db_lookup and database_url and cid:
+            mcc = lookup_mcc_for_customer(database_url, cid)
+            if mcc:
+                return normalize_customer_id(mcc), "db_map"
+        fb = normalize_customer_id(default_mcc_id or "")
+        if fb:
+            return fb, "default"
+        return "", "missing"
 
     @bp.get("/health")
     def health():
@@ -104,8 +120,50 @@ def register_mcp_routes(
                 "service": "google-ads-mcp-http",
                 "mcp_data_routes_enabled": configured,
                 "allowed_date_ranges": list(ALLOWED_MCP_DATE_RANGES),
-                "hint": "Các route metrics nhận query date_range; mặc định YESTERDAY. Cần X-MCP-API-Key cho route dữ liệu.",
+                "customer_mcc_map_enabled": bool(database_url),
+                "hint": "Nếu có DATABASE_URL và đã lưu map CID→MCC, có thể bỏ qua mcc_id khi gọi các route có customer_id.",
             }
+        )
+
+    @bp.get("/resolve_mcc")
+    def resolve_mcc():
+        """Tra cứu MCC cho CID: ưu tiên ?mcc_id=, sau đó bảng map; không dùng MCC mặc định env (tránh nhầm)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        raw = (request.args.get("mcc_id") or "").strip()
+        if raw:
+            return jsonify(
+                {
+                    "ok": True,
+                    "customer_id": cid,
+                    "mcc_customer_id": normalize_customer_id(raw),
+                    "mcc_resolved_via": "query_param",
+                }
+            )
+        if database_url:
+            mcc = lookup_mcc_for_customer(database_url, cid)
+            if mcc:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "customer_id": cid,
+                        "mcc_customer_id": normalize_customer_id(mcc),
+                        "mcc_resolved_via": "db_map",
+                    }
+                )
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "customer_id": cid,
+                    "error": "Chưa có map CID→MCC trong DB. Thêm tại /cid-mcc-map (web) hoặc truyền ?mcc_id=.",
+                }
+            ),
+            404,
         )
 
     @bp.get("/child_accounts")
@@ -113,7 +171,7 @@ def register_mcp_routes(
         err = _mcp_auth_error_response()
         if err:
             return err
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=False)
         if not mcc_id:
             return jsonify({"ok": False, "error": "Thiếu mcc_id (query) và không có MCC mặc định trong cấu hình."}), 400
         try:
@@ -123,6 +181,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "count": len(children),
                     "accounts": [asdict(a) for a in children],
                 }
@@ -138,13 +197,21 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id (tài khoản con, 10 chữ số)."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
             rows = list_campaigns_for_customers(client, [cid])
-            return jsonify({"ok": True, "mcc_customer_id": mcc_id, "customer_id": cid, "campaigns": [asdict(r) for r in rows]})
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaigns": [asdict(r) for r in rows],
+                }
+            )
         except GoogleAdsHelperError as e:
             return jsonify({"ok": False, "error": str(e)}), 502
 
@@ -156,9 +223,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             dr = _parse_date_range_arg()
         except ValueError as e:
@@ -170,6 +237,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "reference_calendar_note": "Metrics theo định nghĩa GAQL của Google Ads cho date_range.",
@@ -187,9 +255,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             dr = _parse_date_range_arg()
         except ValueError as e:
@@ -201,6 +269,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "rows": [asdict(r) for r in rows],
@@ -217,9 +286,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(500)
         try:
             dr = _parse_date_range_arg()
@@ -232,6 +301,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,
@@ -249,9 +319,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(400, cap=5000)
         try:
             dr = _parse_date_range_arg()
@@ -264,6 +334,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,
@@ -281,9 +352,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             dr = _parse_date_range_arg()
         except ValueError as e:
@@ -295,6 +366,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "note": "daily_budget = max(amount_micros) quan sát được trong stream kỳ (xấp xỉ budget ngày hiện tại).",
@@ -312,9 +384,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
             rows = list_negative_keywords_for_customer(client, [cid])
@@ -322,6 +394,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "note": "Danh sách cấu hình hiện tại; query date_range (nếu có) không áp dụng cho negative keywords.",
                     "rows": [asdict(r) for r in rows],
@@ -338,9 +411,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(200, cap=2000)
         try:
             dr = _parse_date_range_arg()
@@ -353,6 +426,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,
@@ -370,9 +444,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             dr = _parse_date_range_arg()
         except ValueError as e:
@@ -384,6 +458,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "rows": [asdict(r) for r in rows],
@@ -400,9 +475,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         try:
             dr = _parse_date_range_arg()
         except ValueError as e:
@@ -414,6 +489,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "note": "Giá trị *_quality_score là bucket lịch sử (enum); lấy segments.date mới nhất trong kỳ cho mỗi keyword.",
@@ -431,9 +507,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(300, cap=2000)
         try:
             dr = _parse_date_range_arg()
@@ -446,6 +522,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,
@@ -463,9 +540,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(300, cap=2000)
         try:
             dr = _parse_date_range_arg()
@@ -478,6 +555,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,
@@ -495,9 +573,9 @@ def register_mcp_routes(
         cid = normalize_customer_id(request.args.get("customer_id", ""))
         if not cid:
             return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
-        mcc_id = _resolve_mcc_id()
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
-            return jsonify({"ok": False, "error": "Thiếu mcc_id."}), 400
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
         limit = _parse_limit(500, cap=10000)
         try:
             dr = _parse_date_range_arg()
@@ -510,6 +588,7 @@ def register_mcp_routes(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "date_range": dr,
                     "limit": limit,

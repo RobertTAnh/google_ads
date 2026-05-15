@@ -49,8 +49,25 @@ Query thường dùng:
 | Đối tượng (audience) + metrics kỳ | GET | `/mcp/v1/audience_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
 | Asset (asset group) + metrics kỳ | GET | `/mcp/v1/asset_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
 | Lịch sử thay đổi (change_event) | GET | `/mcp/v1/change_history` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500, tối đa 10000) |
+| Tra MCC theo CID (chỉ map DB / ?mcc_id=) | GET | `/mcp/v1/resolve_mcc` | `customer_id`, `mcc_id?` |
 
 `customer_id` / `mcc_id`: **10 chữ số** (có thể gõ dạng `123-456-7890`).
+
+### Map CID → MCC (tự chọn MCC khi gọi MCP)
+
+Khi server có **`DATABASE_URL`**, bảng `customer_mcc_map` lưu **CID tài khoản con → MCC**. Với mọi route MCP có `customer_id`, nếu **không** truyền `mcc_id` thì server sẽ:
+
+1. Tra map trong DB  
+2. Nếu không có → dùng **MCC mặc định** từ cấu hình (env / yaml)
+
+Quản lý map: đăng nhập web → **Map CID → MCC** (`/cid-mcc-map`).
+
+Khi server có `DATABASE_URL`, một luồng nền **`cid-mcc-sync`** (mặc định **mỗi 3600 giây**) lấy khóa Postgres advisory, rồi với **mỗi MCC** trong `GOOGLE_ADS_MCC_CONFIGS` (hoặc MCC mặc định từ yaml) gọi Google Ads API liệt kê tài khoản con: **chỉ upsert các CID đang bật**; sau đó **xóa** mọi dòng `customer_mcc_map` cùng `mcc_id` mà không còn trong lần quét (CID hết bật / biến mất khỏi cây MCC). **Label** tay trên web được giữ khi upsert. Biến môi trường:
+
+- `CID_SYNC_ENABLED` — mặc định bật; đặt `0` / `false` / `off` để tắt.
+- `CID_SYNC_INTERVAL_SECONDS` — mặc định `3600` (tối thiểu 60).
+
+API kiểm tra (không dùng MCC mặc định): `GET /mcp/v1/resolve_mcc?customer_id=...` — tool MCP **`ads_resolve_mcc`**.
 
 ---
 

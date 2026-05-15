@@ -24,6 +24,7 @@ mcp = FastMCP(
     "Google Ads (HTTP bridge)",
     instructions=(
         "Tools gọi Google Ads qua server deploy. Bắt buộc customer_id (CID 10 số). "
+        "Nếu server có DATABASE_URL và đã lưu map CID→MCC, có thể bỏ qua mcc_id — dùng ads_resolve_mcc(customer_id) khi cần kiểm tra. "
         "date_range: YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS (GAQL). "
         "Nhiều MCC: truyền mcc_id. CPA trong JSON = cost/conversions khi có conversion."
     ),
@@ -76,6 +77,12 @@ def ads_mcp_health() -> str:
         return r.text
     except httpx.HTTPError as e:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def ads_resolve_mcc(customer_id: str) -> str:
+    """Tra MCC cho CID từ DB map (không dùng MCC mặc định). Gọi trước khi cần chắc chắn đúng MCC."""
+    return _get("/mcp/v1/resolve_mcc", {"customer_id": customer_id})
 
 
 @mcp.tool()
