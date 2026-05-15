@@ -37,6 +37,7 @@ Query thường dùng:
 |----------|--------|------|--------|
 | Tài khoản con dưới MCC | GET | `/mcp/v1/child_accounts` | `mcc_id?` |
 | Danh sách chiến dịch (metadata) | GET | `/mcp/v1/list_campaigns` | `customer_id`, `mcc_id?` |
+| **Target CPA / ROAS cấu hình** (bidding, không phải CPA thực tế) | GET | `/mcp/v1/campaign_bidding` | `customer_id`, `mcc_id?` |
 | Metrics theo campaign (gộp kỳ + CPA) | GET | `/mcp/v1/campaign_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Metrics cấp tài khoản (gộp kỳ + CPA) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Top keyword theo cost (gộp kỳ) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500) |
@@ -91,15 +92,14 @@ File cấu hình (Windows):
 
 (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`)
 
-Thêm (hoặc gộp vào `mcpServers`) mục ví dụ — **sửa `cwd` và URL** cho đúng máy bạn:
+Thêm (hoặc gộp vào `mcpServers`) mục ví dụ — **ưu tiên `run_mcp_stdio.py`** (không phụ thuộc `cwd`; tránh lỗi `No module named mcp_server`):
 
 ```json
 {
   "mcpServers": {
     "google-ads-mcp": {
-      "command": "python",
-      "args": ["-m", "mcp_server"],
-      "cwd": "D:\\1 Code App\\gg ads API",
+      "command": "C:\\Users\\Admin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "args": ["D:\\1 Code App\\gg ads API\\run_mcp_stdio.py"],
       "env": {
         "GOOGLE_ADS_MCP_BASE_URL": "https://your-app.up.railway.app",
         "MCP_API_KEY": "thay-bang-secret-cua-ban"
@@ -107,6 +107,24 @@ Thêm (hoặc gộp vào `mcpServers`) mục ví dụ — **sửa `cwd` và URL*
     }
   }
 }
+```
+
+Mẫu đầy đủ: `claude_desktop_config.example.json` trong repo.
+
+**Không** dùng `mcp-remote` + URL `https://.../mcp` — Railway chỉ có REST `/mcp/v1/...`, không có MCP Streamable HTTP.
+
+Kiểm tra trước khi mở Claude:
+
+```bash
+pip install -r requirements.txt
+python scripts/test_mcp_bridge.py
+```
+
+Cách cũ (vẫn được nếu set đúng `cwd`):
+
+```json
+"args": ["-m", "mcp_server"],
+"cwd": "D:\\1 Code App\\gg ads API"
 ```
 
 Khởi động lại Claude Desktop. Trong chat, thử nhờ Claude dùng **`ads_list_child_accounts`**, **`ads_campaign_performance`** (`date_range` = `LAST_7_DAYS` hoặc `LAST_30_DAYS`), **`ads_search_term_performance`**, **`ads_campaign_budget_metrics`** với `customer_id` thật.

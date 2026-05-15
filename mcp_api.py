@@ -29,6 +29,7 @@ from google_ads_helper import (
     get_keyword_metrics_for_date_range,
     get_keyword_quality_scores_for_date_range,
     get_search_term_metrics_for_date_range,
+    list_campaign_bidding_for_customers,
     list_campaigns_for_customers,
     list_child_accounts_under_mcc,
     list_negative_keywords_for_customer,
@@ -209,6 +210,37 @@ def register_mcp_routes(
                     "mcc_customer_id": mcc_id,
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
+                    "campaigns": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/campaign_bidding")
+    def campaign_bidding():
+        """Target CPA/ROAS đang cấu hình trên campaign (không phải CPA thực tế từ metrics)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = list_campaign_bidding_for_customers(client, [cid])
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": (
+                        "target_cpa / target_roas là mục tiêu bidding đã set trên chiến dịch (hoặc portfolio). "
+                        "cpa trong campaign_performance / campaign_budget_metrics là cost/conversions thực tế trong kỳ."
+                    ),
                     "campaigns": [asdict(r) for r in rows],
                 }
             )

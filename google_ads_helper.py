@@ -50,6 +50,21 @@ class CampaignMetadataRow:
 
 
 @dataclass(frozen=True)
+class CampaignBiddingRow:
+    """Mục tiêu bidding cấu hình trên chiến dịch (target CPA/ROAS), không phải CPA thực tế."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    status: str
+    bidding_strategy_type: str
+    target_cpa: Optional[float]
+    target_roas: Optional[float]
+    bidding_strategy_resource: str
+
+
+@dataclass(frozen=True)
 class KeywordPerformanceRow:
     """Chỉ số ngày hôm qua theo từng từ khóa (GAQL `FROM keyword_view`)."""
 
@@ -1827,6 +1842,216 @@ def list_campaigns_for_customers(
         except GoogleAdsException as ex:
             raise GoogleAdsHelperError(
                 f"Google Ads API error listing campaigns for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    rows.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            x.campaign_id,
+        )
+    )
+    return rows
+
+
+def _micros_to_currency(micros: Any) -> Optional[float]:
+    if micros is None:
+        return None
+    try:
+        v = int(micros)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return v / 1_000_000.0
+
+
+def _target_cpa_from_campaign_proto(campaign: Any) -> Optional[float]:
+    """Đọc target CPA từ scheme bidding gắn trực tiếp trên campaign."""
+    for attr in (
+        "maximize_conversions",
+        "target_cpa",
+        "manual_cpa",
+    ):
+        scheme = getattr(campaign, attr, None)
+        if scheme is None:
+            continue
+        micros = getattr(scheme, "target_cpa_micros", None)
+        val = _micros_to_currency(micros)
+        if val is not None:
+            return val
+    return None
+
+
+def _target_roas_from_campaign_proto(campaign: Any) -> Optional[float]:
+    for attr in ("target_roas", "maximize_conversion_value"):
+        scheme = getattr(campaign, attr, None)
+        if scheme is None:
+            continue
+        roas = getattr(scheme, "target_roas", None)
+        if roas is None:
+            continue
+        try:
+            v = float(roas)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return None
+
+
+def _fetch_portfolio_bidding_targets(
+    ga_service: Any,
+    customer_id: str,
+    resource_names: List[str],
+) -> Dict[str, tuple[Optional[float], Optional[float]]]:
+    """Tra target CPA/ROAS trên bidding_strategy (portfolio) theo resource name."""
+    out: Dict[str, tuple[Optional[float], Optional[float]]] = {}
+    ids: List[str] = []
+    for rn in resource_names:
+        s = str(rn or "").strip()
+        if not s or s in out:
+            continue
+        prefix = "customers/" + customer_id + "/biddingStrategies/"
+        if s.startswith(prefix):
+            bid = s[len(prefix) :].split("/")[0]
+            if bid.isdigit():
+                ids.append(bid)
+        elif "/biddingStrategies/" in s:
+            bid = s.rsplit("/biddingStrategies/", 1)[-1].split("/")[0]
+            if bid.isdigit():
+                ids.append(bid)
+    if not ids:
+        return out
+    id_list = ", ".join(sorted(set(ids)))
+    query = f"""
+        SELECT
+          bidding_strategy.resource_name,
+          bidding_strategy.target_cpa.target_cpa_micros,
+          bidding_strategy.maximize_conversions.target_cpa_micros,
+          bidding_strategy.target_roas.target_roas,
+          bidding_strategy.maximize_conversion_value.target_roas
+        FROM bidding_strategy
+        WHERE bidding_strategy.id IN ({id_list})
+    """.strip()
+    try:
+        stream = ga_service.search_stream(customer_id=customer_id, query=query)
+        for batch in stream:
+            for r in batch.results:
+                bs = r.bidding_strategy
+                rn = str(bs.resource_name or "")
+                tcpa = _micros_to_currency(
+                    getattr(getattr(bs, "target_cpa", None), "target_cpa_micros", None)
+                ) or _micros_to_currency(
+                    getattr(getattr(bs, "maximize_conversions", None), "target_cpa_micros", None)
+                )
+                troas = None
+                for scheme_attr in ("target_roas", "maximize_conversion_value"):
+                    scheme = getattr(bs, scheme_attr, None)
+                    if scheme is None:
+                        continue
+                    raw = getattr(scheme, "target_roas", None)
+                    if raw is not None:
+                        try:
+                            v = float(raw)
+                            if v > 0:
+                                troas = v
+                                break
+                        except (TypeError, ValueError):
+                            pass
+                out[rn] = (tcpa, troas)
+    except GoogleAdsException:
+        pass
+    return out
+
+
+def list_campaign_bidding_for_customers(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+) -> List[CampaignBiddingRow]:
+    """
+    Target CPA / ROAS **đang cấu hình** trên từng chiến dịch (không phải CPA thực tế từ metrics).
+    Hỗ trợ scheme trên campaign và portfolio (bidding_strategy resource).
+    """
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.bidding_strategy_type,
+          campaign.bidding_strategy,
+          campaign.maximize_conversions.target_cpa_micros,
+          campaign.target_cpa.target_cpa_micros,
+          campaign.manual_cpa.target_cpa_micros,
+          campaign.target_roas.target_roas,
+          campaign.maximize_conversion_value.target_roas
+        FROM campaign
+        WHERE campaign.status != REMOVED
+        ORDER BY campaign.name
+    """.strip()
+
+    rows: List[CampaignBiddingRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        pending_portfolio: List[tuple[int, str]] = []
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap = r.campaign
+                    st = cap.status.name if cap.status else ""
+                    bst = cap.bidding_strategy_type.name if cap.bidding_strategy_type else ""
+                    bs_res = str(cap.bidding_strategy or "")
+                    tcpa = _target_cpa_from_campaign_proto(cap)
+                    troas = _target_roas_from_campaign_proto(cap)
+                    row = CampaignBiddingRow(
+                        customer_id=str(r.customer.id),
+                        customer_name=str(r.customer.descriptive_name or ""),
+                        campaign_id=str(cap.id),
+                        campaign_name=str(cap.name or ""),
+                        status=st,
+                        bidding_strategy_type=bst,
+                        target_cpa=tcpa,
+                        target_roas=troas,
+                        bidding_strategy_resource=bs_res,
+                    )
+                    idx = len(rows)
+                    rows.append(row)
+                    if bs_res and (tcpa is None and troas is None):
+                        pending_portfolio.append((idx, bs_res))
+            if pending_portfolio:
+                portfolio = _fetch_portfolio_bidding_targets(
+                    ga_service,
+                    cid,
+                    [rn for _, rn in pending_portfolio],
+                )
+                for idx, rn in pending_portfolio:
+                    ptcpa, ptroas = portfolio.get(rn, (None, None))
+                    if ptcpa is None and ptroas is None:
+                        continue
+                    old = rows[idx]
+                    rows[idx] = CampaignBiddingRow(
+                        customer_id=old.customer_id,
+                        customer_name=old.customer_name,
+                        campaign_id=old.campaign_id,
+                        campaign_name=old.campaign_name,
+                        status=old.status,
+                        bidding_strategy_type=old.bidding_strategy_type,
+                        target_cpa=ptcpa if old.target_cpa is None else old.target_cpa,
+                        target_roas=ptroas if old.target_roas is None else old.target_roas,
+                        bidding_strategy_resource=old.bidding_strategy_resource,
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error listing campaign bidding for customer {cid}:\n"
+                f"{_format_googleads_exception(ex)}"
             ) from ex
         except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
             raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex

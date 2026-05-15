@@ -26,7 +26,8 @@ mcp = FastMCP(
         "Tools gọi Google Ads qua server deploy. Bắt buộc customer_id (CID 10 số). "
         "Nếu server có DATABASE_URL và đã lưu map CID→MCC, có thể bỏ qua mcc_id — dùng ads_resolve_mcc(customer_id) khi cần kiểm tra. "
         "date_range: YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS (GAQL). "
-        "Nhiều MCC: truyền mcc_id. CPA trong JSON = cost/conversions khi có conversion."
+        "Nhiều MCC: truyền mcc_id. CPA trong JSON metrics = cost/conversions. "
+        "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range)."
     ),
 )
 
@@ -95,6 +96,12 @@ def ads_list_child_accounts(mcc_id: str = "") -> str:
 def ads_list_campaigns(customer_id: str, mcc_id: str = "") -> str:
     """Danh sách chiến dịch (metadata: trạng thái, loại kênh), không theo kỳ ngày."""
     return _get("/mcp/v1/list_campaigns", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+
+
+@mcp.tool()
+def ads_campaign_bidding(customer_id: str, mcc_id: str = "") -> str:
+    """Target CPA / target ROAS đang cấu hình trên từng chiến dịch (không phải CPA thực tế cost/conv)."""
+    return _get("/mcp/v1/campaign_bidding", {"customer_id": customer_id, "mcc_id": mcc_id or None})
 
 
 @mcp.tool()
