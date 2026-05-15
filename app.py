@@ -34,6 +34,7 @@ from google_ads_helper import (
     optimize_budgets_by_cpa,
     read_login_customer_id_from_yaml as _read_login_customer_id_from_yaml,
 )
+from mcp_api import register_mcp_routes
 from sheets_reporter import push_yesterday_report_to_sheet
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
@@ -603,6 +604,9 @@ def create_app() -> Flask:
         public_endpoints = {"login", "healthz", "static"}
         if request.endpoint in public_endpoints:
             return None
+        # API MCP: xác thực bằng MCP_API_KEY trong blueprint, không dùng session đăng nhập web.
+        if (request.path or "").startswith("/mcp/v1"):
+            return None
         if session.get("is_authenticated"):
             return None
         return redirect(url_for("login", next=request.url))
@@ -1148,6 +1152,14 @@ def create_app() -> Flask:
         except (ValueError, GoogleAdsHelperError) as e:
             flash(str(e), "danger")
             return redirect(url_for("dashboard"))
+
+    register_mcp_routes(
+        app,
+        build_google_ads_client_for_mcc=_build_google_ads_client_for_mcc,
+        normalize_customer_id=_normalize_customer_id,
+        local_yesterday_iso=_local_yesterday_iso,
+        default_mcc_id=default_mcc_id,
+    )
 
     return app
 

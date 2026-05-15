@@ -37,6 +37,37 @@ class CampaignPerformanceRow:
     conversions: float
 
 
+@dataclass(frozen=True)
+class CampaignMetadataRow:
+    """Thông tin chiến dịch (không theo ngày): id, tên, trạng thái, loại kênh."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    status: str
+    advertising_channel_type: str
+
+
+@dataclass(frozen=True)
+class KeywordPerformanceRow:
+    """Chỉ số ngày hôm qua theo từng từ khóa (GAQL `FROM keyword_view`)."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    keyword_text: str
+    match_type: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+
+
 class GoogleAdsHelperError(RuntimeError):
     """App-friendly wrapper for surfacing Google Ads errors."""
 
@@ -486,6 +517,153 @@ def get_yesterday_campaign_performance(
             (x.customer_name or "").lower(),
             (x.campaign_name or "").lower(),
             x.campaign_id,
+        )
+    )
+    return rows
+
+
+def list_campaigns_for_customers(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+) -> List[CampaignMetadataRow]:
+    """
+    Danh sách chiến dịch (ENABLED / PAUSED / …), bỏ REMOVED.
+    """
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.advertising_channel_type
+        FROM campaign
+        WHERE campaign.status != REMOVED
+        ORDER BY campaign.name
+    """.strip()
+
+    rows: List[CampaignMetadataRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    st = r.campaign.status.name if r.campaign.status else ""
+                    ch = (
+                        r.campaign.advertising_channel_type.name
+                        if r.campaign.advertising_channel_type
+                        else ""
+                    )
+                    rows.append(
+                        CampaignMetadataRow(
+                            customer_id=str(r.customer.id),
+                            customer_name=str(r.customer.descriptive_name or ""),
+                            campaign_id=str(r.campaign.id),
+                            campaign_name=str(r.campaign.name or ""),
+                            status=st,
+                            advertising_channel_type=ch,
+                        )
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error listing campaigns for customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    rows.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            x.campaign_id,
+        )
+    )
+    return rows
+
+
+def get_yesterday_keyword_performance(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    *,
+    limit_per_customer: int = 500,
+) -> List[KeywordPerformanceRow]:
+    """
+    Chỉ số ngày hôm qua theo keyword (Search / mạng có keyword_view).
+    Giới hạn số dòng / tài khoản để tránh payload quá lớn.
+    """
+    if limit_per_customer < 1:
+        limit_per_customer = 1
+    if limit_per_customer > 5000:
+        limit_per_customer = 5000
+
+    ga_service = client.get_service("GoogleAdsService")
+    rows: List[KeywordPerformanceRow] = []
+
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        query = f"""
+            SELECT
+              customer.id,
+              customer.descriptive_name,
+              campaign.id,
+              campaign.name,
+              ad_group.id,
+              ad_group.name,
+              ad_group_criterion.criterion_id,
+              ad_group_criterion.keyword.text,
+              ad_group_criterion.keyword.match_type,
+              metrics.clicks,
+              metrics.impressions,
+              metrics.cost_micros,
+              metrics.conversions
+            FROM keyword_view
+            WHERE segments.date DURING YESTERDAY
+            ORDER BY metrics.cost_micros DESC
+            LIMIT {int(limit_per_customer)}
+        """.strip()
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    mt = ""
+                    if r.ad_group_criterion.keyword.match_type:
+                        mt = r.ad_group_criterion.keyword.match_type.name
+                    cost = (r.metrics.cost_micros or 0) / 1_000_000.0
+                    rows.append(
+                        KeywordPerformanceRow(
+                            customer_id=str(r.customer.id),
+                            customer_name=str(r.customer.descriptive_name or ""),
+                            campaign_id=str(r.campaign.id),
+                            campaign_name=str(r.campaign.name or ""),
+                            ad_group_id=str(r.ad_group.id),
+                            ad_group_name=str(r.ad_group.name or ""),
+                            criterion_id=str(r.ad_group_criterion.criterion_id),
+                            keyword_text=str(r.ad_group_criterion.keyword.text or ""),
+                            match_type=mt,
+                            clicks=int(r.metrics.clicks or 0),
+                            impressions=int(r.metrics.impressions or 0),
+                            cost=float(cost),
+                            conversions=float(r.metrics.conversions or 0.0),
+                        )
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error for keyword_view customer {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    rows.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            (x.keyword_text or "").lower(),
         )
     )
     return rows
