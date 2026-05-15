@@ -19,9 +19,11 @@ from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
     GoogleAdsHelperError,
     McpDateFilter,
-    mcp_custom_date_max_days,
+    CHANGE_EVENT_GAQL_LIMIT,
+    resolve_mcp_auction_insight_date_filter,
     resolve_mcp_date_filter,
     get_ad_group_metrics_for_date_range,
+    get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
     get_asset_performance_for_date_range,
     get_audience_performance_for_date_range,
@@ -79,6 +81,17 @@ def _parse_date_filter_arg() -> McpDateFilter:
         raise ValueError(str(e)) from e
 
 
+def _parse_auction_insight_date_filter_arg() -> McpDateFilter:
+    try:
+        return resolve_mcp_auction_insight_date_filter(
+            date_range=request.args.get("date_range"),
+            start_date=request.args.get("start_date"),
+            end_date=request.args.get("end_date"),
+        )
+    except GoogleAdsHelperError as e:
+        raise ValueError(str(e)) from e
+
+
 def _date_filter_call_kwargs(df: McpDateFilter) -> dict[str, str]:
     if df.is_custom:
         return {"start_date": df.start_date or "", "end_date": df.end_date or ""}
@@ -91,15 +104,6 @@ def _date_filter_json(df: McpDateFilter) -> dict[str, Any]:
         out["start_date"] = df.start_date
         out["end_date"] = df.end_date
     return out
-
-
-def _parse_limit(default: int, cap: int = 5000) -> int:
-    raw = (request.args.get("limit") or str(default)).strip()
-    try:
-        n = int(raw)
-    except ValueError:
-        n = default
-    return max(1, min(cap, n))
 
 
 def register_mcp_routes(
@@ -143,8 +147,7 @@ def register_mcp_routes(
                 "custom_date_range": {
                     "start_date": "YYYY-MM-DD",
                     "end_date": "YYYY-MM-DD",
-                    "max_span_days": mcp_custom_date_max_days(),
-                    "note": "Truyền cả start_date và end_date; ưu tiên hơn date_range. Env MCP_CUSTOM_DATE_MAX_DAYS.",
+                    "note": "Truyền cả start_date và end_date; ưu tiên hơn date_range. Không giới hạn độ dài khoảng ngày phía app.",
                 },
                 "customer_mcc_map_enabled": bool(database_url),
                 "hint": "Nếu có DATABASE_URL và đã lưu map CID→MCC, có thể bỏ qua mcc_id khi gọi các route có customer_id.",
@@ -346,16 +349,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(500)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_keyword_metrics_for_date_range(
-                client, [cid], **_date_filter_call_kwargs(df), limit_per_customer=limit
-            )
+            rows = get_keyword_metrics_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -363,7 +363,6 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
                     "rows": [asdict(r) for r in rows],
                 }
             )
@@ -381,16 +380,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(400, cap=5000)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_search_term_metrics_for_date_range(
-                client, [cid], **_date_filter_call_kwargs(df), limit_per_customer=limit
-            )
+            rows = get_search_term_metrics_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -398,7 +394,6 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
                     "rows": [asdict(r) for r in rows],
                 }
             )
@@ -475,16 +470,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(200, cap=2000)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_ad_performance_for_date_range(
-                client, [cid], **_date_filter_call_kwargs(df), limit_per_customer=limit
-            )
+            rows = get_ad_performance_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -492,7 +484,6 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
                     "rows": [asdict(r) for r in rows],
                 }
             )
@@ -573,16 +564,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(300, cap=2000)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_audience_performance_for_date_range(
-                client, [cid], **_date_filter_call_kwargs(df), limit_per_customer=limit
-            )
+            rows = get_audience_performance_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -590,7 +578,6 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
                     "rows": [asdict(r) for r in rows],
                 }
             )
@@ -608,16 +595,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(300, cap=2000)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_asset_performance_for_date_range(
-                client, [cid], **_date_filter_call_kwargs(df), limit_per_customer=limit
-            )
+            rows = get_asset_performance_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -625,7 +609,6 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
                     "rows": [asdict(r) for r in rows],
                 }
             )
@@ -643,14 +626,13 @@ def register_mcp_routes(
         mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
         if not mcc_id:
             return jsonify({"ok": False, "error": _MCC_ERR}), 400
-        limit = _parse_limit(500, cap=10000)
         try:
             df = _parse_date_filter_arg()
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            rows = get_change_events_for_date_range(client, [cid], **_date_filter_call_kwargs(df), limit=limit)
+            rows = get_change_events_for_date_range(client, [cid], **_date_filter_call_kwargs(df))
             return jsonify(
                 {
                     "ok": True,
@@ -658,8 +640,61 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     **_date_filter_json(df),
-                    "limit": limit,
-                    "note": "Google Ads giới hạn change_event trong cửa sổ gần đây (~30 ngày).",
+                    "change_event_gaql_limit": CHANGE_EVENT_GAQL_LIMIT,
+                    "note": (
+                        "Google chỉ lưu change_event ~30 ngày; GAQL bắt buộc LIMIT "
+                        f"(tối đa {CHANGE_EVENT_GAQL_LIMIT} — trần nền tảng)."
+                    ),
+                    "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/auction_insights")
+    def auction_insights():
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+        try:
+            df = _parse_auction_insight_date_filter_arg()
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = get_auction_insights_for_campaigns(
+                client,
+                [cid],
+                **_date_filter_call_kwargs(df),
+                campaign_id=campaign_id,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaign_id": campaign_id,
+                    **_date_filter_json(df),
+                    "level": "campaign",
+                    "channel": "SEARCH",
+                    "note": (
+                        "Tỷ lệ metrics là thập phân 0–1 (nhân 100 để ra %). Chỉ Search. "
+                        "display_domain rỗng có thể là hàng «Bạn». Dữ liệu lịch sử phụ thuộc Google."
+                    ),
                     "rows": [asdict(r) for r in rows],
                 }
             )

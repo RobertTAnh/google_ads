@@ -31,7 +31,7 @@ Các route dữ liệu cần header:
 Query thường dùng:
 
 - **`date_range`** (GAQL `DURING`, chung cho các route metrics): `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua.
-- **`start_date`** + **`end_date`** (tùy chọn, `YYYY-MM-DD`): khoảng tùy chỉnh qua GAQL `BETWEEN` — **ưu tiên hơn** `date_range` khi truyền đủ cả hai. Giới hạn độ dài: env `MCP_CUSTOM_DATE_MAX_DAYS` (mặc định 90, tối đa 365). Xem `GET /mcp/v1/health` → `custom_date_range`.
+- **`start_date`** + **`end_date`** (tùy chọn, `YYYY-MM-DD`): khoảng tùy chỉnh qua GAQL `BETWEEN` — **ưu tiên hơn** `date_range` khi truyền đủ cả hai (không giới hạn độ dài phía app; Google Ads có thể từ chối khoảng quá dài).
 - **`cpa`** trong JSON: `cost / conversions` khi có conversion; không có conversion thì `null`.
 
 | Mục đích | Method | Path | Query |
@@ -41,16 +41,17 @@ Query thường dùng:
 | **Target CPA / ROAS cấu hình** (bidding, không phải CPA thực tế) | GET | `/mcp/v1/campaign_bidding` | `customer_id`, `mcc_id?` |
 | Metrics theo campaign (gộp kỳ + CPA) | GET | `/mcp/v1/campaign_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Metrics cấp tài khoản (gộp kỳ + CPA) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?`, `date_range?` |
-| Top keyword theo cost (gộp kỳ) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500) |
-| Top cụm từ tìm kiếm thực tế (gộp kỳ) | GET | `/mcp/v1/search_term_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 400) |
+| Keyword (gộp kỳ, mọi dòng có metrics) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
+| Cụm từ tìm kiếm thực tế (gộp kỳ) | GET | `/mcp/v1/search_term_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Campaign + ngân sách ngày + metrics kỳ + CPA | GET | `/mcp/v1/campaign_budget_metrics` | `customer_id`, `mcc_id?`, `date_range?` |
-| Quảng cáo (ad) + metrics kỳ | GET | `/mcp/v1/ad_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 200) |
+| Quảng cáo (ad) + metrics kỳ | GET | `/mcp/v1/ad_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Từ khóa phủ định (snapshot) | GET | `/mcp/v1/negative_keywords` | `customer_id`, `mcc_id?` (`date_range` không dùng) |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |
-| Đối tượng (audience) + metrics kỳ | GET | `/mcp/v1/audience_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
-| Asset (asset group) + metrics kỳ | GET | `/mcp/v1/asset_performance` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 300) |
-| Lịch sử thay đổi (change_event) | GET | `/mcp/v1/change_history` | `customer_id`, `mcc_id?`, `date_range?`, `limit?` (mặc định 500, tối đa 10000) |
+| Đối tượng (audience) + metrics kỳ | GET | `/mcp/v1/audience_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
+| Asset (asset group) + metrics kỳ | GET | `/mcp/v1/asset_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
+| Lịch sử thay đổi (change_event) | GET | `/mcp/v1/change_history` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` (Google: ~30 ngày, GAQL LIMIT 10000) |
+| **Auction Insights (Search)** | GET | `/mcp/v1/auction_insights` | `customer_id`, `mcc_id?`, `campaign_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Tra MCC theo CID (chỉ map DB / ?mcc_id=) | GET | `/mcp/v1/resolve_mcc` | `customer_id`, `mcc_id?` |
 
 `customer_id` / `mcc_id`: **10 chữ số** (có thể gõ dạng `123-456-7890`).

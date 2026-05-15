@@ -86,8 +86,9 @@ class KeywordPerformanceRow:
 
 # GAQL predefined date ranges (segments.date DURING …). Dùng cho MCP / báo cáo kỳ.
 ALLOWED_MCP_DATE_RANGES: Tuple[str, ...] = ("YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS")
-MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT = 90
 _MCP_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Google Ads API bắt buộc LIMIT trên change_event; 10000 là trần nền tảng (không phải giới hạn app).
+CHANGE_EVENT_GAQL_LIMIT = 10000
 
 
 @dataclass(frozen=True)
@@ -314,6 +315,23 @@ class ChangeEventRow:
     changed_fields: str
 
 
+@dataclass(frozen=True)
+class AuctionInsightRow:
+    """Search Auction Insights (theo campaign + domain đối thủ / bạn). Tỷ lệ = thập phân 0–1."""
+
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    display_domain: str
+    date_range: str
+    impression_share: Optional[float]
+    overlap_rate: Optional[float]
+    outranking_share: Optional[float]
+    top_impression_percentage: Optional[float]
+    absolute_top_impression_percentage: Optional[float]
+    position_above_rate: Optional[float]
+
+
 class GoogleAdsHelperError(RuntimeError):
     """App-friendly wrapper for surfacing Google Ads errors."""
 
@@ -377,21 +395,11 @@ def _parse_mcp_iso_date(raw: str) -> datetime.date:
         raise GoogleAdsHelperError(f"Ngày không hợp lệ: {raw!r}.") from e
 
 
-def mcp_custom_date_max_days() -> int:
-    raw = (os.getenv("MCP_CUSTOM_DATE_MAX_DAYS") or str(MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT)).strip()
-    try:
-        n = int(raw)
-    except ValueError:
-        n = MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT
-    return max(1, min(365, n))
-
-
 def resolve_mcp_date_filter(
     *,
     date_range: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    max_custom_days: Optional[int] = None,
 ) -> McpDateFilter:
     """
     Ưu tiên start_date + end_date (GAQL BETWEEN). Nếu không có thì dùng date_range (GAQL DURING).
@@ -405,13 +413,6 @@ def resolve_mcp_date_filter(
         d1 = _parse_mcp_iso_date(ed_raw)
         if d0 > d1:
             raise GoogleAdsHelperError("start_date phải nhỏ hơn hoặc bằng end_date.")
-        cap = max_custom_days if max_custom_days is not None else mcp_custom_date_max_days()
-        span_days = (d1 - d0).days + 1
-        if span_days > cap:
-            raise GoogleAdsHelperError(
-                f"Khoảng ngày tối đa {cap} ngày (đang yêu cầu {span_days} ngày). "
-                f"Đặt MCP_CUSTOM_DATE_MAX_DAYS trên server nếu cần tăng (tối đa 365)."
-            )
         s0, s1 = d0.isoformat(), d1.isoformat()
         return McpDateFilter(
             label=f"{s0}..{s1}",
@@ -422,6 +423,28 @@ def resolve_mcp_date_filter(
         )
     dr = normalize_mcp_date_range(date_range)
     return McpDateFilter(label=dr, gaql_predicate=f"DURING {dr}", is_custom=False)
+
+
+def resolve_mcp_auction_insight_date_filter(
+    *,
+    date_range: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> McpDateFilter:
+    return resolve_mcp_date_filter(
+        date_range=date_range,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+def _optional_metric_rate(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return None
 
 
 def _cpa_from_cost_and_conversions(cost: float, conversions: float) -> Optional[float]:
@@ -887,14 +910,9 @@ def get_keyword_metrics_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit_per_customer: int = 500,
 ) -> List[KeywordPeriodMetricsRow]:
-    """Gộp keyword_view theo kỳ; trả top `limit_per_customer` theo cost sau khi gộp."""
+    """Gộp keyword_view theo kỳ; trả mọi keyword có dữ liệu (sắp xếp theo cost giảm dần)."""
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 5000:
-        limit_per_customer = 5000
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -951,7 +969,7 @@ def get_keyword_metrics_for_date_range(
                     a["impressions"] += int(r.metrics.impressions or 0)
                     a["cost_micros"] += int(r.metrics.cost_micros or 0)
                     a["conversions"] += float(r.metrics.conversions or 0.0)
-            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)
             for (cap_id, ag_id, crit_id), a in ranked:
                 cost = a["cost_micros"] / 1_000_000.0
                 conv = float(a["conversions"])
@@ -998,14 +1016,9 @@ def get_search_term_metrics_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit_per_customer: int = 400,
 ) -> List[SearchTermPeriodMetricsRow]:
-    """Cụm từ tìm kiếm thực tế (search_term_view), gộp theo kỳ, top theo cost."""
+    """Cụm từ tìm kiếm thực tế (search_term_view), gộp theo kỳ (sắp xếp theo cost giảm dần)."""
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 5000:
-        limit_per_customer = 5000
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -1055,7 +1068,7 @@ def get_search_term_metrics_for_date_range(
                     a["impressions"] += int(r.metrics.impressions or 0)
                     a["cost_micros"] += int(r.metrics.cost_micros or 0)
                     a["conversions"] += float(r.metrics.conversions or 0.0)
-            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)
             for (cap_id, ag_id, term), a in ranked:
                 cost = a["cost_micros"] / 1_000_000.0
                 conv = float(a["conversions"])
@@ -1380,14 +1393,9 @@ def get_ad_performance_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit_per_customer: int = 200,
 ) -> List[AdPeriodMetricsRow]:
-    """Metrics theo từng ad (ad_group_ad), gộp kỳ; top theo cost."""
+    """Metrics theo từng ad (ad_group_ad), gộp kỳ (sắp xếp theo cost giảm dần)."""
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 2000:
-        limit_per_customer = 2000
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -1445,7 +1453,7 @@ def get_ad_performance_for_date_range(
                     a["impressions"] += int(r.metrics.impressions or 0)
                     a["cost_micros"] += int(r.metrics.cost_micros or 0)
                     a["conversions"] += float(r.metrics.conversions or 0.0)
-            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)
             for (cap_id, ag_id, ad_id), a in ranked:
                 cost = a["cost_micros"] / 1_000_000.0
                 conv = float(a["conversions"])
@@ -1581,13 +1589,8 @@ def get_audience_performance_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit_per_customer: int = 300,
 ) -> List[AudiencePeriodMetricsRow]:
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 2000:
-        limit_per_customer = 2000
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -1639,7 +1642,7 @@ def get_audience_performance_for_date_range(
                     a["impressions"] += int(r.metrics.impressions or 0)
                     a["cost_micros"] += int(r.metrics.cost_micros or 0)
                     a["conversions"] += float(r.metrics.conversions or 0.0)
-            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)
             for (cap_id, ag_id, crit_id), a in ranked:
                 cost = a["cost_micros"] / 1_000_000.0
                 conv = float(a["conversions"])
@@ -1679,13 +1682,8 @@ def get_asset_performance_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit_per_customer: int = 300,
 ) -> List[AssetPeriodMetricsRow]:
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit_per_customer < 1:
-        limit_per_customer = 1
-    if limit_per_customer > 2000:
-        limit_per_customer = 2000
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -1737,7 +1735,7 @@ def get_asset_performance_for_date_range(
                     a["impressions"] += int(r.metrics.impressions or 0)
                     a["cost_micros"] += int(r.metrics.cost_micros or 0)
                     a["conversions"] += float(r.metrics.conversions or 0.0)
-            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)[:limit_per_customer]
+            ranked = sorted(acc.items(), key=lambda kv: kv[1]["cost_micros"], reverse=True)
             for (cap_id, agroup_id, asset_id), a in ranked:
                 cost = a["cost_micros"] / 1_000_000.0
                 conv = float(a["conversions"])
@@ -1777,15 +1775,11 @@ def get_change_events_for_date_range(
     *,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: int = 500,
 ) -> List[ChangeEventRow]:
     """
-    Lịch sử thay đổi (change_event). Google giới hạn truy vấn ~30 ngày gần nhất.
+    Lịch sử thay đổi (change_event). Google chỉ lưu ~30 ngày; GAQL bắt buộc LIMIT (tối đa 10000).
     """
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
-    if limit < 1:
-        limit = 1
-    limit = min(limit, 10000)
 
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -1799,7 +1793,7 @@ def get_change_events_for_date_range(
         FROM change_event
         WHERE change_event.change_date_time {df.gaql_predicate}
         ORDER BY change_event.change_date_time DESC
-        LIMIT {int(limit)}
+        LIMIT {CHANGE_EVENT_GAQL_LIMIT}
     """.strip()
 
     out: List[ChangeEventRow] = []
@@ -1836,6 +1830,133 @@ def get_change_events_for_date_range(
             ) from ex
         except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
             raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+    return out
+
+
+def get_auction_insights_for_campaigns(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str = "LAST_7_DAYS",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> List[AuctionInsightRow]:
+    """
+    Search Auction Insights cấp campaign (GAQL `FROM campaign` + `segments.auction_insight_domain`).
+    Cần quyền metric auction insight trên developer token / tài khoản.
+    """
+    df = resolve_mcp_auction_insight_date_filter(
+        date_range=date_range, start_date=start_date, end_date=end_date
+    )
+    cap_filter = ""
+    if campaign_id:
+        cap_filter = f"\n          AND campaign.id = {int(campaign_id)}"
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          campaign.id,
+          campaign.name,
+          segments.auction_insight_domain,
+          metrics.auction_insight_search_impression_share,
+          metrics.auction_insight_search_overlap_rate,
+          metrics.auction_insight_search_outranking_share,
+          metrics.auction_insight_search_top_impression_percentage,
+          metrics.auction_insight_search_absolute_top_impression_percentage,
+          metrics.auction_insight_search_position_above_rate
+        FROM campaign
+        WHERE segments.date {df.gaql_predicate}
+          AND campaign.advertising_channel_type = 'SEARCH'
+          AND campaign.status IN (ENABLED, PAUSED){cap_filter}
+    """.strip()
+
+    out: List[AuctionInsightRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        acc: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    cap_id = str(r.campaign.id)
+                    domain = str(r.segments.auction_insight_domain or "").strip()
+                    key = (cap_id, domain)
+                    row_rates = {
+                        "impression_share": _optional_metric_rate(
+                            r.metrics.auction_insight_search_impression_share
+                        ),
+                        "overlap_rate": _optional_metric_rate(r.metrics.auction_insight_search_overlap_rate),
+                        "outranking_share": _optional_metric_rate(
+                            r.metrics.auction_insight_search_outranking_share
+                        ),
+                        "top_impression_percentage": _optional_metric_rate(
+                            r.metrics.auction_insight_search_top_impression_percentage
+                        ),
+                        "absolute_top_impression_percentage": _optional_metric_rate(
+                            r.metrics.auction_insight_search_absolute_top_impression_percentage
+                        ),
+                        "position_above_rate": _optional_metric_rate(
+                            r.metrics.auction_insight_search_position_above_rate
+                        ),
+                    }
+                    if key not in acc:
+                        acc[key] = {
+                            "customer_id": cid,
+                            "campaign_name": str(r.campaign.name or ""),
+                            "n": 1,
+                            **row_rates,
+                        }
+                    else:
+                        a = acc[key]
+                        a["n"] += 1
+                        for k, v in row_rates.items():
+                            if v is None:
+                                continue
+                            prev = a.get(k)
+                            if prev is None:
+                                a[k] = v
+                            else:
+                                a[k] = (prev * (a["n"] - 1) + v) / a["n"]
+            for (cap_id, domain), a in acc.items():
+                out.append(
+                    AuctionInsightRow(
+                        customer_id=cid,
+                        campaign_id=cap_id,
+                        campaign_name=a["campaign_name"],
+                        display_domain=domain,
+                        date_range=df.label,
+                        impression_share=a.get("impression_share"),
+                        overlap_rate=a.get("overlap_rate"),
+                        outranking_share=a.get("outranking_share"),
+                        top_impression_percentage=a.get("top_impression_percentage"),
+                        absolute_top_impression_percentage=a.get("absolute_top_impression_percentage"),
+                        position_above_rate=a.get("position_above_rate"),
+                    )
+                )
+        except GoogleAdsException as ex:
+            msg = _format_googleads_exception(ex)
+            hint = ""
+            if "auction_insight" in msg.lower() or "doesn't have access" in msg.lower():
+                hint = (
+                    " Gợi ý: metric Auction Insights có thể chưa được bật cho developer token / "
+                    "tài khoản này (thử trên UI «Thông tin chuyên sâu về đấu giá» trước)."
+                )
+            raise GoogleAdsHelperError(
+                f"Google Ads API error (auction insights) for customer {cid}:\n{msg}{hint}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.campaign_name or "").lower(),
+            (x.display_domain or "").lower(),
+            x.campaign_id,
+        )
+    )
     return out
 
 
@@ -2165,16 +2286,9 @@ def list_campaign_bidding_for_customers(
 def get_yesterday_keyword_performance(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    *,
-    limit_per_customer: int = 500,
 ) -> List[KeywordPerformanceRow]:
-    """
-    Chỉ số ngày hôm qua theo keyword (Search / mạng có keyword_view).
-    Giới hạn số dòng / tài khoản để tránh payload quá lớn.
-    """
-    period = get_keyword_metrics_for_date_range(
-        client, customer_ids, "YESTERDAY", limit_per_customer=limit_per_customer
-    )
+    """Chỉ số ngày hôm qua theo keyword (Search / mạng có keyword_view)."""
+    period = get_keyword_metrics_for_date_range(client, customer_ids, "YESTERDAY")
     return [
         KeywordPerformanceRow(
             customer_id=p.customer_id,

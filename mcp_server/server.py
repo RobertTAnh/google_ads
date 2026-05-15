@@ -30,7 +30,8 @@ mcp = FastMCP(
         "Kỳ: date_range (YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS) "
         "hoặc start_date + end_date (YYYY-MM-DD, ví dụ từ 2026-05-05). "
         "Nhiều MCC: truyền mcc_id. CPA trong JSON metrics = cost/conversions. "
-        "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range)."
+        "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range). "
+        "Auction Insights (Search): ads_get_auction_insights."
     ),
 )
 
@@ -173,12 +174,12 @@ def ads_keyword_performance(
     date_range: str = "YESTERDAY",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 500,
 ) -> str:
-    """Top keyword (keyword_view) theo cost trong kỳ; Search-heavy."""
-    p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/keyword_performance", p)
+    """Keyword (keyword_view) trong kỳ, sắp xếp theo cost; Search-heavy."""
+    return _get(
+        "/mcp/v1/keyword_performance",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
 
 
 @mcp.tool()
@@ -188,12 +189,12 @@ def ads_search_term_performance(
     date_range: str = "LAST_7_DAYS",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 400,
 ) -> str:
-    """Cụm từ tìm kiếm thực tế (search_term_view), top theo cost; mặc định 7 ngày."""
-    p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/search_term_performance", p)
+    """Cụm từ tìm kiếm thực tế (search_term_view) trong kỳ; mặc định 7 ngày."""
+    return _get(
+        "/mcp/v1/search_term_performance",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
 
 
 @mcp.tool()
@@ -218,12 +219,12 @@ def ads_get_ad_performance(
     date_range: str = "LAST_7_DAYS",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 200,
 ) -> str:
-    """Theo từng quảng cáo (ad_group_ad): type, cost, clicks, conv, CPA — top theo cost."""
-    p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/ad_performance", p)
+    """Theo từng quảng cáo (ad_group_ad): type, cost, clicks, conv, CPA trong kỳ."""
+    return _get(
+        "/mcp/v1/ad_performance",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
 
 
 @mcp.tool()
@@ -269,12 +270,12 @@ def ads_get_audience_performance(
     date_range: str = "LAST_7_DAYS",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 300,
 ) -> str:
-    """Đối tượng (ad_group_audience_view): display_name, type, metrics, CPA; top theo cost."""
-    p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/audience_performance", p)
+    """Đối tượng (ad_group_audience_view): display_name, type, metrics, CPA trong kỳ."""
+    return _get(
+        "/mcp/v1/audience_performance",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
 
 
 @mcp.tool()
@@ -284,12 +285,28 @@ def ads_get_asset_performance(
     date_range: str = "LAST_30_DAYS",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 300,
 ) -> str:
-    """Asset trong asset group (PMax…): type, metrics, CPA; top theo cost."""
+    """Asset trong asset group (PMax…): type, metrics, CPA trong kỳ."""
+    return _get(
+        "/mcp/v1/asset_performance",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
+
+
+@mcp.tool()
+def ads_get_auction_insights(
+    customer_id: str,
+    mcc_id: str = "",
+    campaign_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
+    """Search Auction Insights (đối thủ): domain, impression share, overlap, outranking, top/abs top, position above. Chỉ Search."""
     p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/asset_performance", p)
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    return _get("/mcp/v1/auction_insights", p)
 
 
 @mcp.tool()
@@ -299,12 +316,12 @@ def ads_get_change_history(
     date_range: str = "LAST_7_DAYS",
     start_date: str = "",
     end_date: str = "",
-    limit: int = 500,
 ) -> str:
     """Lịch sử thay đổi (change_event): thời điểm, loại resource, user, field đổi."""
-    p = _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date)
-    p["limit"] = str(limit)
-    return _get("/mcp/v1/change_history", p)
+    return _get(
+        "/mcp/v1/change_history",
+        _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
+    )
 
 
 def main() -> None:
