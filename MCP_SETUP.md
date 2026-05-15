@@ -30,7 +30,8 @@ Các route dữ liệu cần header:
 
 Query thường dùng:
 
-- **`date_range`** (GAQL, chung cho các route metrics): `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua. Giá trị hợp lệ xem thêm trong `GET /mcp/v1/health` → `allowed_date_ranges`.
+- **`date_range`** (GAQL `DURING`, chung cho các route metrics): `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua.
+- **`start_date`** + **`end_date`** (tùy chọn, `YYYY-MM-DD`): khoảng tùy chỉnh qua GAQL `BETWEEN` — **ưu tiên hơn** `date_range` khi truyền đủ cả hai. Giới hạn độ dài: env `MCP_CUSTOM_DATE_MAX_DAYS` (mặc định 90, tối đa 365). Xem `GET /mcp/v1/health` → `custom_date_range`.
 - **`cpa`** trong JSON: `cost / conversions` khi có conversion; không có conversion thì `null`.
 
 | Mục đích | Method | Path | Query |

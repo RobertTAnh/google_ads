@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import os
@@ -85,6 +86,19 @@ class KeywordPerformanceRow:
 
 # GAQL predefined date ranges (segments.date DURING …). Dùng cho MCP / báo cáo kỳ.
 ALLOWED_MCP_DATE_RANGES: Tuple[str, ...] = ("YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS")
+MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT = 90
+_MCP_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class McpDateFilter:
+    """Kỳ báo cáo MCP: GAQL literal DURING … hoặc BETWEEN 'YYYY-MM-DD' AND '…'."""
+
+    label: str
+    gaql_predicate: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    is_custom: bool = False
 
 
 @dataclass(frozen=True)
@@ -351,6 +365,63 @@ def normalize_mcp_date_range(raw: Optional[str]) -> str:
         allowed = ", ".join(ALLOWED_MCP_DATE_RANGES)
         raise GoogleAdsHelperError(f"date_range không hợp lệ: {raw!r}. Chọn một trong: {allowed}")
     return s
+
+
+def _parse_mcp_iso_date(raw: str) -> datetime.date:
+    s = (raw or "").strip()
+    if not _MCP_ISO_DATE_RE.match(s):
+        raise GoogleAdsHelperError(f"Ngày không hợp lệ: {raw!r}. Dùng định dạng YYYY-MM-DD.")
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError as e:
+        raise GoogleAdsHelperError(f"Ngày không hợp lệ: {raw!r}.") from e
+
+
+def mcp_custom_date_max_days() -> int:
+    raw = (os.getenv("MCP_CUSTOM_DATE_MAX_DAYS") or str(MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT)).strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = MCP_CUSTOM_DATE_MAX_DAYS_DEFAULT
+    return max(1, min(365, n))
+
+
+def resolve_mcp_date_filter(
+    *,
+    date_range: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_custom_days: Optional[int] = None,
+) -> McpDateFilter:
+    """
+    Ưu tiên start_date + end_date (GAQL BETWEEN). Nếu không có thì dùng date_range (GAQL DURING).
+    """
+    sd_raw = (start_date or "").strip()
+    ed_raw = (end_date or "").strip()
+    if sd_raw or ed_raw:
+        if not sd_raw or not ed_raw:
+            raise GoogleAdsHelperError("Cần cả start_date và end_date (YYYY-MM-DD) cho khoảng tùy chỉnh.")
+        d0 = _parse_mcp_iso_date(sd_raw)
+        d1 = _parse_mcp_iso_date(ed_raw)
+        if d0 > d1:
+            raise GoogleAdsHelperError("start_date phải nhỏ hơn hoặc bằng end_date.")
+        cap = max_custom_days if max_custom_days is not None else mcp_custom_date_max_days()
+        span_days = (d1 - d0).days + 1
+        if span_days > cap:
+            raise GoogleAdsHelperError(
+                f"Khoảng ngày tối đa {cap} ngày (đang yêu cầu {span_days} ngày). "
+                f"Đặt MCP_CUSTOM_DATE_MAX_DAYS trên server nếu cần tăng (tối đa 365)."
+            )
+        s0, s1 = d0.isoformat(), d1.isoformat()
+        return McpDateFilter(
+            label=f"{s0}..{s1}",
+            gaql_predicate=f"BETWEEN '{s0}' AND '{s1}'",
+            start_date=s0,
+            end_date=s1,
+            is_custom=True,
+        )
+    dr = normalize_mcp_date_range(date_range)
+    return McpDateFilter(label=dr, gaql_predicate=f"DURING {dr}", is_custom=False)
 
 
 def _cpa_from_cost_and_conversions(cost: float, conversions: float) -> Optional[float]:
@@ -649,10 +720,13 @@ def list_child_accounts_under_mcc(client: GoogleAdsClient, mcc_customer_id: str)
 def get_customer_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[CustomerPeriodMetricsRow]:
-    """Gộp metrics cấp tài khoản theo GAQL `segments.date DURING <date_range>`."""
-    dr = normalize_mcp_date_range(date_range)
+    """Gộp metrics cấp tài khoản theo GAQL segments.date (DURING hoặc BETWEEN)."""
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -663,7 +737,7 @@ def get_customer_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM customer
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[CustomerPeriodMetricsRow] = []
@@ -692,7 +766,7 @@ def get_customer_metrics_for_date_range(
                     CustomerPeriodMetricsRow(
                         customer_id=cid,
                         customer_name="",
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=0,
                         impressions=0,
                         cost=0.0,
@@ -705,7 +779,7 @@ def get_customer_metrics_for_date_range(
                     CustomerPeriodMetricsRow(
                         customer_id=str(cid),
                         customer_name=name,
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=clicks,
                         impressions=impressions,
                         cost=float(cost),
@@ -723,10 +797,13 @@ def get_customer_metrics_for_date_range(
 def get_campaign_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[CampaignPeriodMetricsRow]:
     """Gộp metrics theo campaign trong kỳ (ENABLED + PAUSED)."""
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -739,7 +816,7 @@ def get_campaign_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM campaign
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
           AND campaign.status IN (ENABLED, PAUSED)
     """.strip()
 
@@ -778,7 +855,7 @@ def get_campaign_metrics_for_date_range(
                         customer_name=a["customer_name"],
                         campaign_id=cap_id,
                         campaign_name=a["campaign_name"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -806,12 +883,14 @@ def get_campaign_metrics_for_date_range(
 def get_keyword_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit_per_customer: int = 500,
 ) -> List[KeywordPeriodMetricsRow]:
     """Gộp keyword_view theo kỳ; trả top `limit_per_customer` theo cost sau khi gộp."""
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit_per_customer < 1:
         limit_per_customer = 1
     if limit_per_customer > 5000:
@@ -834,7 +913,7 @@ def get_keyword_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM keyword_view
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[KeywordPeriodMetricsRow] = []
@@ -887,7 +966,7 @@ def get_keyword_metrics_for_date_range(
                         criterion_id=crit_id,
                         keyword_text=a["keyword_text"],
                         match_type=a["match_type"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -915,12 +994,14 @@ def get_keyword_metrics_for_date_range(
 def get_search_term_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit_per_customer: int = 400,
 ) -> List[SearchTermPeriodMetricsRow]:
     """Cụm từ tìm kiếm thực tế (search_term_view), gộp theo kỳ, top theo cost."""
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit_per_customer < 1:
         limit_per_customer = 1
     if limit_per_customer > 5000:
@@ -941,7 +1022,7 @@ def get_search_term_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM search_term_view
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[SearchTermPeriodMetricsRow] = []
@@ -987,7 +1068,7 @@ def get_search_term_metrics_for_date_range(
                         ad_group_id=ag_id,
                         ad_group_name=a["ad_group_name"],
                         search_term=term,
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -1015,10 +1096,13 @@ def get_search_term_metrics_for_date_range(
 def get_campaign_budget_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[CampaignBudgetPeriodRow]:
     """Campaign + ngân sách ngày (amount_micros) + metrics gộp trong kỳ (CPA = cost / conv)."""
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -1034,7 +1118,7 @@ def get_campaign_budget_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM campaign
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
           AND campaign.status IN (ENABLED, PAUSED)
     """.strip()
 
@@ -1081,7 +1165,7 @@ def get_campaign_budget_metrics_for_date_range(
                         campaign_id=cap_id,
                         campaign_name=a["campaign_name"],
                         status=str(a["status"]),
-                        date_range=dr,
+                        date_range=df.label,
                         daily_budget=float(daily_budget),
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
@@ -1202,9 +1286,12 @@ def list_negative_keywords_for_customer(
 def get_ad_group_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[AdGroupPeriodMetricsRow]:
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -1219,7 +1306,7 @@ def get_ad_group_metrics_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM ad_group
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[AdGroupPeriodMetricsRow] = []
@@ -1261,7 +1348,7 @@ def get_ad_group_metrics_for_date_range(
                         campaign_name=a["campaign_name"],
                         ad_group_id=ag_id,
                         ad_group_name=a["ad_group_name"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -1289,12 +1376,14 @@ def get_ad_group_metrics_for_date_range(
 def get_ad_performance_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit_per_customer: int = 200,
 ) -> List[AdPeriodMetricsRow]:
     """Metrics theo từng ad (ad_group_ad), gộp kỳ; top theo cost."""
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit_per_customer < 1:
         limit_per_customer = 1
     if limit_per_customer > 2000:
@@ -1317,7 +1406,7 @@ def get_ad_performance_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM ad_group_ad
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
           AND ad_group_ad.status IN (ENABLED, PAUSED)
     """.strip()
 
@@ -1371,7 +1460,7 @@ def get_ad_performance_for_date_range(
                         ad_id=ad_id,
                         ad_name=a["ad_name"],
                         ad_type=a["ad_type"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -1393,13 +1482,16 @@ def get_ad_performance_for_date_range(
 def get_keyword_quality_scores_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> List[KeywordQualityPeriodRow]:
     """
     Quality score lịch sử (keyword_view + segments.date).
     Với mỗi keyword lấy bản ghi có segments.date mới nhất trong kỳ.
     """
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
         SELECT
@@ -1416,7 +1508,7 @@ def get_keyword_quality_scores_for_date_range(
           metrics.historical_creative_quality_score,
           metrics.historical_landing_page_quality_score
         FROM keyword_view
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[KeywordQualityPeriodRow] = []
@@ -1458,7 +1550,7 @@ def get_keyword_quality_scores_for_date_range(
                         criterion_id=crit_id,
                         keyword_text=b["keyword_text"],
                         match_type=b["match_type"],
-                        date_range=dr,
+                        date_range=df.label,
                         latest_segment_date=b["segment_date"],
                         historical_quality_score=b["hq"],
                         historical_creative_quality_score=b["hc"],
@@ -1485,11 +1577,13 @@ def get_keyword_quality_scores_for_date_range(
 def get_audience_performance_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit_per_customer: int = 300,
 ) -> List[AudiencePeriodMetricsRow]:
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit_per_customer < 1:
         limit_per_customer = 1
     if limit_per_customer > 2000:
@@ -1511,7 +1605,7 @@ def get_audience_performance_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM ad_group_audience_view
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[AudiencePeriodMetricsRow] = []
@@ -1559,7 +1653,7 @@ def get_audience_performance_for_date_range(
                         criterion_id=crit_id,
                         audience_display_name=a["display_name"],
                         criterion_type=a["crit_type"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -1581,11 +1675,13 @@ def get_audience_performance_for_date_range(
 def get_asset_performance_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit_per_customer: int = 300,
 ) -> List[AssetPeriodMetricsRow]:
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit_per_customer < 1:
         limit_per_customer = 1
     if limit_per_customer > 2000:
@@ -1607,7 +1703,7 @@ def get_asset_performance_for_date_range(
           metrics.cost_micros,
           metrics.conversions
         FROM asset_group_asset
-        WHERE segments.date DURING {dr}
+        WHERE segments.date {df.gaql_predicate}
     """.strip()
 
     out: List[AssetPeriodMetricsRow] = []
@@ -1655,7 +1751,7 @@ def get_asset_performance_for_date_range(
                         asset_id=asset_id,
                         asset_name=a["asset_name"],
                         asset_type=a["asset_type"],
-                        date_range=dr,
+                        date_range=df.label,
                         clicks=int(a["clicks"]),
                         impressions=int(a["impressions"]),
                         cost=float(cost),
@@ -1677,14 +1773,16 @@ def get_asset_performance_for_date_range(
 def get_change_events_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
-    date_range: str,
+    date_range: str = "YESTERDAY",
     *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit: int = 500,
 ) -> List[ChangeEventRow]:
     """
     Lịch sử thay đổi (change_event). Google giới hạn truy vấn ~30 ngày gần nhất.
     """
-    dr = normalize_mcp_date_range(date_range)
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     if limit < 1:
         limit = 1
     limit = min(limit, 10000)
@@ -1699,7 +1797,7 @@ def get_change_events_for_date_range(
           change_event.resource_name,
           change_event.changed_fields
         FROM change_event
-        WHERE change_event.change_date_time DURING {dr}
+        WHERE change_event.change_date_time {df.gaql_predicate}
         ORDER BY change_event.change_date_time DESC
         LIMIT {int(limit)}
     """.strip()
