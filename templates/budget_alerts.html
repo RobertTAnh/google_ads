@@ -1,0 +1,163 @@
+{% extends "layout.html" %}
+
+{% block title %}Cảnh báo ngân sách{% endblock %}
+
+{% block content %}
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+      <h1 class="h3 mb-1">Cảnh báo ngân sách</h1>
+      <div class="text-muted">
+        Theo dõi CID thủ công — scheduler chạy mỗi {{ interval_hours | round(1) }}h, gửi Slack khi tổng NS ngày (ENABLED) × 4 &gt; NS tài khoản còn lại.
+      </div>
+    </div>
+  </div>
+
+  {% if not slack_configured %}
+    <div class="alert alert-warning">
+      Chưa cấu hình <code>SLACK_WEBHOOK_URL</code> — vẫn kiểm tra được nhưng không gửi Slack.
+    </div>
+  {% endif %}
+
+  <div class="card mb-4 border-info">
+    <div class="card-header fw-semibold">Thông báo trên điện thoại (Slack)</div>
+    <div class="card-body small">
+      <ol class="mb-0">
+        <li>Tạo channel Slack (vd. <code>#ads-budget-alerts</code>).</li>
+        <li>Thêm <a href="https://api.slack.com/messaging/webhooks" target="_blank" rel="noopener">Incoming Webhook</a> vào channel → copy URL.</li>
+        <li>Đặt <code>SLACK_WEBHOOK_URL</code> trên server / Railway.</li>
+        <li>Cài app Slack trên điện thoại → bật push notification cho channel đó.</li>
+      </ol>
+      <p class="mb-0 mt-2 text-muted">Cooldown giữa các lần gửi lại: {{ cooldown_hours | int }}h (env <code>BUDGET_ALERT_COOLDOWN_HOURS</code>).</p>
+    </div>
+  </div>
+
+  {% if not database_enabled %}
+    <div class="alert alert-warning">Cấu hình <code>DATABASE_URL</code> trên Railway để bật tính năng này.</div>
+  {% else %}
+    <div class="card mb-4">
+      <div class="card-header fw-semibold">Thêm CID theo dõi</div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('budget_alerts_add') }}" class="row g-3">
+          <div class="col-md-3">
+            <label class="form-label">CID (tk con)</label>
+            <input class="form-control" name="customer_id" placeholder="10 chữ số" required>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">MCC</label>
+            <select class="form-select" name="mcc_id">
+              <option value="">— Tự tra map CID→MCC —</option>
+              {% for opt in mcc_options %}
+                <option value="{{ opt.mcc_id }}">{{ opt.label }} ({{ opt.mcc_id }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Ghi chú (tuỳ chọn)</label>
+            <input class="form-control" name="label" placeholder="Tên shop">
+          </div>
+          <div class="col-md-2 d-flex align-items-end">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" name="active" id="baActiveCk" checked>
+              <label class="form-check-label" for="baActiveCk">Theo dõi</label>
+            </div>
+          </div>
+          <div class="col-md-1 d-flex align-items-end">
+            <button class="btn btn-primary w-100" type="submit">Lưu</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header fw-semibold">Danh sách theo dõi ({{ rows|length }})</div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-striped table-hover mb-0">
+            <thead>
+              <tr>
+                <th>CID</th>
+                <th>MCC</th>
+                <th>Label</th>
+                <th>NS ngày (ENABLED)</th>
+                <th>NS còn lại</th>
+                <th>~Ngày còn</th>
+                <th>Trạng thái</th>
+                <th>Check / Alert</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rows %}
+                <tr>
+                  <td class="font-monospace">{{ r.customer_id | cidfmt }}</td>
+                  <td class="font-monospace small">{{ r.mcc_id | cidfmt }}</td>
+                  <td>{{ r.label }}</td>
+                  <td class="small">
+                    {% if r.last_total_daily_micros %}
+                      {{ (r.last_total_daily_micros / 1000000) | round(2) }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td class="small">
+                    {% if r.last_remaining_micros is not none %}
+                      {{ (r.last_remaining_micros / 1000000) | round(2) }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td class="small">
+                    {% if r.last_days_remaining is not none %}
+                      {{ r.last_days_remaining | round(1) }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if r.last_status == 'alert' %}
+                      <span class="badge text-bg-danger">Cảnh báo</span>
+                    {% elif r.last_status == 'ok' %}
+                      <span class="badge text-bg-success">Ổn</span>
+                    {% elif r.last_status == 'no_account_budget' %}
+                      <span class="badge text-bg-secondary">Không có NS TK</span>
+                    {% elif r.last_status == 'error' %}
+                      <span class="badge text-bg-warning">Lỗi</span>
+                    {% else %}
+                      <span class="badge text-bg-light text-dark">{{ r.last_status or '—' }}</span>
+                    {% endif %}
+                    {% if r.last_error %}
+                      <div class="small text-danger">{{ r.last_error }}</div>
+                    {% endif %}
+                  </td>
+                  <td class="small text-muted">
+                    {% if r.last_check_at %}Check: {{ r.last_check_at[:19] }}{% endif %}
+                    {% if r.last_alert_at %}<br>Alert: {{ r.last_alert_at[:19] }}{% endif %}
+                  </td>
+                  <td class="text-nowrap">
+                    <form method="post" action="{{ url_for('budget_alerts_run_now', customer_id=r.customer_id) }}" class="d-inline">
+                      <button type="submit" class="btn btn-sm btn-outline-primary">Kiểm tra ngay</button>
+                    </form>
+                    <form method="post" action="{{ url_for('budget_alerts_toggle', customer_id=r.customer_id) }}" class="d-inline">
+                      <input type="hidden" name="active" value="{{ 'off' if r.active else 'on' }}">
+                      <button type="submit" class="btn btn-sm btn-outline-secondary">
+                        {{ 'Tắt' if r.active else 'Bật' }}
+                      </button>
+                    </form>
+                    <form method="post" action="{{ url_for('budget_alerts_delete') }}" class="d-inline" onsubmit="return confirm('Xóa {{ r.customer_id }}?');">
+                      <input type="hidden" name="customer_id" value="{{ r.customer_id }}">
+                      <button type="submit" class="btn btn-sm btn-outline-danger">Xóa</button>
+                    </form>
+                  </td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td colspan="9" class="text-muted px-3 py-4">Chưa có CID nào — thêm ở form trên.</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

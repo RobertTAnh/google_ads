@@ -2580,3 +2580,235 @@ def optimize_budgets_by_cpa(
 
     return {"updated": updated, "skipped": skipped}
 
+
+@dataclass(frozen=True)
+class AccountBudgetSnapshot:
+    """Ngân sách cấp tài khoản (account budget) — không phải campaign budget."""
+
+    customer_id: str
+    customer_name: str
+    currency_code: str
+    account_budget_id: str
+    limit_micros: Optional[int]
+    served_micros: int
+    remaining_micros: Optional[int]
+    is_unlimited: bool
+
+
+@dataclass(frozen=True)
+class BudgetRunwayEvaluation:
+    customer_id: str
+    customer_name: str
+    currency_code: str
+    total_daily_micros: int
+    enabled_campaign_count: int
+    remaining_micros: Optional[int]
+    limit_micros: Optional[int]
+    days_remaining: Optional[float]
+    should_alert: bool
+    status: str  # ok | alert | no_account_budget | no_daily_budget | error
+    message: str
+
+
+def get_enabled_campaigns_daily_budget_total(
+    client: GoogleAdsClient,
+    customer_id: str,
+) -> Tuple[int, int, str]:
+    """
+    Tổng ngân sách ngày của chiến dịch ENABLED, khử trùng theo campaign_budget resource.
+    Returns (total_micros, campaign_count, customer_name).
+    """
+    customer_id = str(customer_id).strip().replace("-", "")
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.campaign_budget,
+          campaign_budget.amount_micros
+        FROM campaign
+        WHERE campaign.status = ENABLED
+    """.strip()
+
+    budget_micros_by_resource: Dict[str, int] = {}
+    customer_name = ""
+    try:
+        stream = ga_service.search_stream(customer_id=customer_id, query=query)
+        for batch in stream:
+            for r in batch.results:
+                customer_name = str(r.customer.descriptive_name or customer_name)
+                budget_rn = str(r.campaign.campaign_budget or "")
+                if not budget_rn:
+                    continue
+                amount = int(r.campaign_budget.amount_micros or 0)
+                if amount <= 0:
+                    continue
+                prev = budget_micros_by_resource.get(budget_rn, 0)
+                if amount > prev:
+                    budget_micros_by_resource[budget_rn] = amount
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Failed to fetch enabled campaign budgets for {customer_id}:\n"
+            f"{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {customer_id}: {ex}") from ex
+
+    total = sum(budget_micros_by_resource.values())
+    return total, len(budget_micros_by_resource), customer_name
+
+
+def get_account_budget_remaining(
+    client: GoogleAdsClient,
+    customer_id: str,
+) -> AccountBudgetSnapshot:
+    """
+    Lấy ngân sách tài khoản còn lại từ account_budget (adjusted limit - amount served).
+    """
+    customer_id = str(customer_id).strip().replace("-", "")
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          customer.currency_code,
+          account_budget.id,
+          account_budget.status,
+          account_budget.adjusted_spending_limit_micros,
+          account_budget.adjusted_spending_limit_type,
+          account_budget.amount_served_micros
+        FROM account_budget
+        WHERE account_budget.status = APPROVED
+        ORDER BY account_budget.id DESC
+        LIMIT 1
+    """.strip()
+
+    try:
+        resp = ga_service.search(customer_id=customer_id, query=query)
+        for r in resp:
+            name = str(r.customer.descriptive_name or "")
+            currency = str(r.customer.currency_code or "USD")
+            ab = r.account_budget
+            limit_type = ""
+            if ab.adjusted_spending_limit_type:
+                limit_type = str(ab.adjusted_spending_limit_type.name or "").upper()
+            limit_micros: Optional[int] = None
+            if ab.adjusted_spending_limit_micros is not None:
+                try:
+                    limit_micros = int(ab.adjusted_spending_limit_micros)
+                except (TypeError, ValueError):
+                    limit_micros = None
+            served = int(ab.amount_served_micros or 0)
+            is_unlimited = limit_type in ("INFINITE", "UNLIMITED") or (
+                limit_micros is None or limit_micros <= 0
+            )
+            remaining: Optional[int] = None
+            if not is_unlimited and limit_micros is not None and limit_micros > 0:
+                remaining = max(0, limit_micros - served)
+            return AccountBudgetSnapshot(
+                customer_id=customer_id,
+                customer_name=name,
+                currency_code=currency,
+                account_budget_id=str(ab.id or ""),
+                limit_micros=limit_micros if not is_unlimited else None,
+                served_micros=served,
+                remaining_micros=remaining,
+                is_unlimited=is_unlimited,
+            )
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Failed to fetch account budget for {customer_id}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {customer_id}: {ex}") from ex
+
+    return AccountBudgetSnapshot(
+        customer_id=customer_id,
+        customer_name="",
+        currency_code="USD",
+        account_budget_id="",
+        limit_micros=None,
+        served_micros=0,
+        remaining_micros=None,
+        is_unlimited=True,
+    )
+
+
+def evaluate_budget_runway(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    runway_days_threshold: float = 4.0,
+) -> BudgetRunwayEvaluation:
+    """
+    So sánh tổng ngân sách ngày (ENABLED) với ngân sách tài khoản còn lại.
+    should_alert khi total_daily * runway_days_threshold > remaining.
+    """
+    customer_id = str(customer_id).strip().replace("-", "")
+    total_daily, _budget_count, name_from_campaigns = get_enabled_campaigns_daily_budget_total(
+        client, customer_id
+    )
+    account = get_account_budget_remaining(client, customer_id)
+    customer_name = account.customer_name or name_from_campaigns
+    currency = account.currency_code or "USD"
+
+    if account.is_unlimited or account.remaining_micros is None:
+        return BudgetRunwayEvaluation(
+            customer_id=customer_id,
+            customer_name=customer_name,
+            currency_code=currency,
+            total_daily_micros=total_daily,
+            enabled_campaign_count=_budget_count,
+            remaining_micros=None,
+            limit_micros=account.limit_micros,
+            days_remaining=None,
+            should_alert=False,
+            status="no_account_budget",
+            message="Tài khoản không có account budget giới hạn (prepay/unlimited).",
+        )
+
+    if total_daily <= 0:
+        return BudgetRunwayEvaluation(
+            customer_id=customer_id,
+            customer_name=customer_name,
+            currency_code=currency,
+            total_daily_micros=0,
+            enabled_campaign_count=_budget_count,
+            remaining_micros=account.remaining_micros,
+            limit_micros=account.limit_micros,
+            days_remaining=None,
+            should_alert=False,
+            status="no_daily_budget",
+            message="Không có chiến dịch ENABLED với ngân sách ngày > 0.",
+        )
+
+    remaining = account.remaining_micros
+    days_remaining = remaining / float(total_daily) if remaining is not None else None
+    threshold_micros = int(total_daily * runway_days_threshold)
+    should_alert = remaining is not None and threshold_micros > remaining
+
+    if should_alert:
+        msg = (
+            f"Ngân sách còn ~{days_remaining:.1f} ngày "
+            f"(tổng NS ngày × {runway_days_threshold:g} > NS còn lại)."
+        )
+        status = "alert"
+    else:
+        msg = f"Ổn định (~{days_remaining:.1f} ngày còn lại theo NS ngày hiện tại)."
+        status = "ok"
+
+    return BudgetRunwayEvaluation(
+        customer_id=customer_id,
+        customer_name=customer_name,
+        currency_code=currency,
+        total_daily_micros=total_daily,
+        enabled_campaign_count=_budget_count,
+        remaining_micros=remaining,
+        limit_micros=account.limit_micros,
+        days_remaining=days_remaining,
+        should_alert=should_alert,
+        status=status,
+        message=msg,
+    )
+

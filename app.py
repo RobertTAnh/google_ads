@@ -24,8 +24,10 @@ from psycopg.types.json import Jsonb
 
 from google_ads_helper import (
     GoogleAdsHelperError,
+    BudgetRunwayEvaluation,
     build_google_ads_client_for_mcc_id,
     create_performance_max_campaign_for_local_leads,
+    evaluate_budget_runway,
     format_vnd_thousands,
     get_yesterday_campaign_performance,
     get_customer_name,
@@ -41,9 +43,19 @@ from cid_mcc_store import (
     delete_mapping,
     delete_mappings_for_mcc_except_customer_ids,
     list_mappings,
+    lookup_mcc_for_customer,
     upsert_mapping,
     upsert_mapping_sync,
 )
+from budget_alert_store import (
+    delete_watch,
+    init_budget_alert_watch_table,
+    list_watch,
+    set_watch_active,
+    update_watch_check_result,
+    upsert_watch,
+)
+from slack_notifier import send_budget_alert
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
@@ -52,6 +64,9 @@ _REPORT_SCHEDULER_START_LOCK = threading.Lock()
 _CID_SYNC_SCHEDULER_STARTED = False
 _CID_SYNC_START_LOCK = threading.Lock()
 _CID_SYNC_LEADER_LOCK_ID = 8104202602
+_BUDGET_ALERT_SCHEDULER_STARTED = False
+_BUDGET_ALERT_START_LOCK = threading.Lock()
+_BUDGET_ALERT_LEADER_LOCK_ID = 8104202603
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -419,6 +434,199 @@ def _acquire_cid_sync_leader(database_url: str) -> Optional[psycopg.Connection]:
         return None
 
 
+def _acquire_budget_alert_leader(database_url: str) -> Optional[psycopg.Connection]:
+    conn = psycopg.connect(database_url, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_BUDGET_ALERT_LEADER_LOCK_ID,))
+            ok = bool(cur.fetchone()[0])
+        if ok:
+            return conn
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
+
+
+def _parse_iso_utc(ts: str) -> Optional[datetime]:
+    raw = (ts or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(ZoneInfo("UTC"))
+    except ValueError:
+        return None
+
+
+def _budget_alert_cooldown_elapsed(last_alert_at: str, cooldown_hours: float) -> bool:
+    last = _parse_iso_utc(last_alert_at)
+    if last is None:
+        return True
+    return datetime.now(ZoneInfo("UTC")) - last >= timedelta(hours=max(0.0, cooldown_hours))
+
+
+def _mcc_label_for_id(mcc_id: str, mcc_configs: dict) -> str:
+    mid = _normalize_customer_id(mcc_id)
+    cfg = mcc_configs.get(mid) if mid else None
+    if isinstance(cfg, dict):
+        return str(cfg.get("label") or "").strip()
+    return ""
+
+
+def _run_budget_check_for_watch(
+    database_url: str,
+    watch: dict,
+    *,
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    mcc_configs: dict,
+    slack_webhook_url: str,
+    cooldown_hours: float,
+    bypass_cooldown: bool = False,
+) -> BudgetRunwayEvaluation:
+    cid = _normalize_customer_id(str(watch.get("customer_id", "")))
+    mcc = _normalize_customer_id(str(watch.get("mcc_id", "")))
+    if not mcc:
+        mcc = _normalize_customer_id(lookup_mcc_for_customer(database_url, cid) or "")
+    if not mcc:
+        update_watch_check_result(
+            database_url,
+            customer_id=cid,
+            last_status="error",
+            last_error="Chưa có MCC — thêm mcc_id hoặc map CID→MCC.",
+        )
+        raise GoogleAdsHelperError("Chưa có MCC cho CID này.")
+
+    client = build_google_ads_client_for_mcc(mcc)
+    ev = evaluate_budget_runway(client, cid)
+    mcc_label = _mcc_label_for_id(mcc, mcc_configs)
+
+    alert_at: Optional[str] = None
+    err_msg = ""
+    if ev.should_alert:
+        can_send = bypass_cooldown or _budget_alert_cooldown_elapsed(
+            str(watch.get("last_alert_at", "")), cooldown_hours
+        )
+        if can_send and slack_webhook_url:
+            try:
+                send_budget_alert(
+                    slack_webhook_url,
+                    cid=cid,
+                    name=ev.customer_name or str(watch.get("label", "")),
+                    total_daily_micros=ev.total_daily_micros,
+                    remaining_micros=ev.remaining_micros,
+                    days_est=ev.days_remaining,
+                    mcc_id=mcc,
+                    mcc_label=mcc_label,
+                    currency_code=ev.currency_code,
+                )
+                alert_at = datetime.now(ZoneInfo("UTC")).isoformat()
+            except Exception as ex:
+                err_msg = f"Slack: {ex}"
+        elif can_send and not slack_webhook_url:
+            err_msg = "SLACK_WEBHOOK_URL chưa cấu hình."
+        elif not can_send:
+            err_msg = f"Đang trong cooldown ({cooldown_hours:g}h)."
+    elif ev.status == "ok":
+        alert_at = ""
+
+    update_watch_check_result(
+        database_url,
+        customer_id=cid,
+        last_status=ev.status,
+        last_error=err_msg,
+        last_total_daily_micros=ev.total_daily_micros,
+        last_remaining_micros=ev.remaining_micros,
+        last_days_remaining=ev.days_remaining,
+        last_alert_at=alert_at if alert_at is not None else None,
+    )
+    return ev
+
+
+def _maybe_start_budget_alert_scheduler(
+    database_url: Optional[str],
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    mcc_configs: dict,
+) -> None:
+    global _BUDGET_ALERT_SCHEDULER_STARTED
+    if not database_url:
+        return
+    raw = (os.getenv("BUDGET_ALERT_SCHEDULER_ENABLED") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    with _BUDGET_ALERT_START_LOCK:
+        if _BUDGET_ALERT_SCHEDULER_STARTED:
+            return
+        _BUDGET_ALERT_SCHEDULER_STARTED = True
+
+    log = logging.getLogger(__name__)
+
+    def _runner() -> None:
+        interval = max(
+            300,
+            int((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600),
+        )
+        cooldown_hours = float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6)
+        webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        while True:
+            leader_conn: Optional[psycopg.Connection] = None
+            try:
+                leader_conn = _acquire_budget_alert_leader(database_url)
+                if leader_conn is None:
+                    time.sleep(60)
+                    continue
+                watches = list_watch(database_url, active_only=True)
+                for w in watches:
+                    try:
+                        _run_budget_check_for_watch(
+                            database_url,
+                            w,
+                            build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
+                            mcc_configs=mcc_configs,
+                            slack_webhook_url=webhook,
+                            cooldown_hours=cooldown_hours,
+                            bypass_cooldown=False,
+                        )
+                    except GoogleAdsHelperError as ex:
+                        log.warning("Budget alert check %s: %s", w.get("customer_id"), ex)
+                    except Exception as ex:
+                        log.exception("Budget alert check failed for %s", w.get("customer_id"))
+                        cid = _normalize_customer_id(str(w.get("customer_id", "")))
+                        if cid:
+                            update_watch_check_result(
+                                database_url,
+                                customer_id=cid,
+                                last_status="error",
+                                last_error=str(ex),
+                            )
+                    time.sleep(2)
+            except Exception:
+                log.exception("Budget alert scheduler loop error")
+            finally:
+                if leader_conn is not None:
+                    try:
+                        with leader_conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT pg_advisory_unlock(%s)",
+                                (_BUDGET_ALERT_LEADER_LOCK_ID,),
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        leader_conn.close()
+                    except Exception:
+                        pass
+            time.sleep(interval)
+
+    th = threading.Thread(target=_runner, daemon=True, name="budget-alert-scheduler")
+    th.start()
+
+
 def _customer_client_map_active(status: str) -> bool:
     """Chỉ map active=True cho tài khoản còn dùng được (lookup MCP bỏ qua active=False)."""
     s = (status or "").strip().upper().replace("CUSTOMER_CLIENT_STATUS_", "")
@@ -648,6 +856,7 @@ def create_app() -> Flask:
             from cid_mcc_store import init_customer_mcc_map_table
 
             init_customer_mcc_map_table(database_url)
+            init_budget_alert_watch_table(database_url)
         except Exception as ex:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
     _maybe_start_report_scheduler(report_projects_file, database_url or None)
@@ -704,6 +913,11 @@ def create_app() -> Flask:
         list(mcc_configs.keys()) if mcc_configs else ([default_mcc_id] if default_mcc_id else [])
     )
     _maybe_start_cid_mcc_sync_scheduler(database_url or None, mcc_ids_for_cid_sync, _build_google_ads_client_for_mcc)
+    _maybe_start_budget_alert_scheduler(
+        database_url or None,
+        _build_google_ads_client_for_mcc,
+        mcc_configs,
+    )
 
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
@@ -1323,6 +1537,116 @@ def create_app() -> Flask:
             delete_mapping(database_url, cid)
             flash("Đã xóa map.", "info")
         return redirect(url_for("cid_mcc_map_page"))
+
+    @app.get("/budget-alerts")
+    def budget_alerts_page():
+        if not database_url:
+            flash("Cấu hình DATABASE_URL trên server để bật cảnh báo ngân sách.", "warning")
+            return render_template(
+                "budget_alerts.html",
+                rows=[],
+                database_enabled=False,
+                mcc_options=_mcc_options_for_ui(),
+                slack_configured=bool((os.getenv("SLACK_WEBHOOK_URL") or "").strip()),
+                cooldown_hours=float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6),
+                interval_hours=float((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600)
+                / 3600.0,
+            )
+        rows = list_watch(database_url)
+        return render_template(
+            "budget_alerts.html",
+            rows=rows,
+            database_enabled=True,
+            mcc_options=_mcc_options_for_ui(),
+            slack_configured=bool((os.getenv("SLACK_WEBHOOK_URL") or "").strip()),
+            cooldown_hours=float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6),
+            interval_hours=float((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600)
+            / 3600.0,
+        )
+
+    @app.post("/budget-alerts/add")
+    def budget_alerts_add():
+        if not database_url:
+            flash("Thiếu DATABASE_URL.", "danger")
+            return redirect(url_for("budget_alerts_page"))
+        cid = _normalize_customer_id(request.form.get("customer_id", ""))
+        mcc = _normalize_customer_id(request.form.get("mcc_id", ""))
+        if not mcc:
+            mcc = _normalize_customer_id(lookup_mcc_for_customer(database_url, cid) or "")
+        label = (request.form.get("label") or "").strip()
+        active = (request.form.get("active") or "on").strip().lower() in ("1", "true", "yes", "on")
+        if not cid:
+            flash("CID phải đúng 10 chữ số.", "warning")
+            return redirect(url_for("budget_alerts_page"))
+        if not mcc:
+            flash("Chọn MCC hoặc map CID→MCC trước.", "warning")
+            return redirect(url_for("budget_alerts_page"))
+        try:
+            upsert_watch(database_url, customer_id=cid, mcc_id=mcc, label=label, active=active)
+            flash("Đã thêm CID vào danh sách theo dõi.", "success")
+        except ValueError as e:
+            flash(str(e), "danger")
+        except Exception as e:
+            flash(f"Lỗi: {e}", "danger")
+        return redirect(url_for("budget_alerts_page"))
+
+    @app.post("/budget-alerts/delete")
+    def budget_alerts_delete():
+        if not database_url:
+            return redirect(url_for("budget_alerts_page"))
+        cid = _normalize_customer_id(request.form.get("customer_id", ""))
+        if cid:
+            delete_watch(database_url, cid)
+            flash("Đã xóa khỏi danh sách theo dõi.", "info")
+        return redirect(url_for("budget_alerts_page"))
+
+    @app.post("/budget-alerts/<customer_id>/toggle")
+    def budget_alerts_toggle(customer_id: str):
+        if not database_url:
+            return redirect(url_for("budget_alerts_page"))
+        cid = _normalize_customer_id(customer_id)
+        active_raw = (request.form.get("active") or "").strip().lower()
+        active = active_raw in ("1", "true", "yes", "on")
+        if cid:
+            set_watch_active(database_url, cid, active)
+            flash("Đã cập nhật trạng thái theo dõi.", "success")
+        return redirect(url_for("budget_alerts_page"))
+
+    @app.post("/budget-alerts/<customer_id>/run-now")
+    def budget_alerts_run_now(customer_id: str):
+        if not database_url:
+            flash("Thiếu DATABASE_URL.", "danger")
+            return redirect(url_for("budget_alerts_page"))
+        cid = _normalize_customer_id(customer_id)
+        watch = None
+        for w in list_watch(database_url):
+            if _normalize_customer_id(str(w.get("customer_id", ""))) == cid:
+                watch = w
+                break
+        if not watch:
+            flash("CID không có trong danh sách theo dõi.", "warning")
+            return redirect(url_for("budget_alerts_page"))
+        webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        cooldown_hours = float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6)
+        try:
+            ev = _run_budget_check_for_watch(
+                database_url,
+                watch,
+                build_google_ads_client_for_mcc=_build_google_ads_client_for_mcc,
+                mcc_configs=mcc_configs,
+                slack_webhook_url=webhook,
+                cooldown_hours=cooldown_hours,
+                bypass_cooldown=True,
+            )
+            if ev.should_alert:
+                flash(f"Đã kiểm tra — cảnh báo: {ev.message}", "warning")
+            else:
+                flash(f"Đã kiểm tra — {ev.message}", "success")
+        except GoogleAdsHelperError as e:
+            flash(str(e), "danger")
+        except Exception as e:
+            flash(f"Lỗi: {e}", "danger")
+        return redirect(url_for("budget_alerts_page"))
 
     register_mcp_routes(
         app,

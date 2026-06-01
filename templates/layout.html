@@ -9,9 +9,8 @@
   <body class="bg-light">
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom">
       <div class="container-fluid">
-        <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('dashboard') if is_logged_in else url_for('login') }}">
+        <a class="navbar-brand" href="{{ url_for('report_projects') if is_logged_in else url_for('login') }}">
           <span class="fw-semibold">Google Ads</span>
-          <span class="badge text-bg-secondary">Internal</span>
         </a>
 
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle navigation">
@@ -22,13 +21,10 @@
           <ul class="navbar-nav me-auto mb-2 mb-lg-0">
             {% if is_logged_in %}
               <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('dashboard') }}">Tổng quan</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('create_campaign_form') }}">Tạo chiến dịch</a>
-              </li>
-              <li class="nav-item">
                 <a class="nav-link" href="{{ url_for('report_projects') }}">Báo cáo tự động</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('budget_alerts_page') }}">Cảnh báo ngân sách</a>
               </li>
               <li class="nav-item">
                 <a class="nav-link" href="{{ url_for('cid_mcc_map_page') }}">Map CID → MCC</a>
