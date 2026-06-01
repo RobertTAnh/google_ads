@@ -19,7 +19,14 @@
   {% endif %}
 
   <div class="card mb-4 border-info">
-    <div class="card-header fw-semibold">Thông báo trên điện thoại (Slack)</div>
+    <div class="card-header d-flex align-items-center justify-content-between">
+      <span class="fw-semibold">Thông báo trên điện thoại (Slack)</span>
+      <form method="post" action="{{ url_for('budget_alerts_test_slack') }}" class="mb-0">
+        <button type="submit" class="btn btn-sm btn-info" {% if not slack_configured %}disabled title="Cần SLACK_WEBHOOK_URL"{% endif %}>
+          Gửi test Slack
+        </button>
+      </form>
+    </div>
     <div class="card-body small">
       <ol class="mb-0">
         <li>Tạo channel Slack (vd. <code>#ads-budget-alerts</code>).</li>
@@ -27,7 +34,10 @@
         <li>Đặt <code>SLACK_WEBHOOK_URL</code> trên server / Railway.</li>
         <li>Cài app Slack trên điện thoại → bật push notification cho channel đó.</li>
       </ol>
-      <p class="mb-0 mt-2 text-muted">Cooldown giữa các lần gửi lại: {{ cooldown_hours | int }}h (env <code>BUDGET_ALERT_COOLDOWN_HOURS</code>).</p>
+      <p class="mb-0 mt-2 text-muted">
+        Cooldown giữa các lần gửi lại: {{ cooldown_hours | int }}h (env <code>BUDGET_ALERT_COOLDOWN_HOURS</code>).
+        Nút <strong>Gửi test Slack</strong> gửi tin thử ngay, không cần chờ scheduler.
+      </p>
     </div>
   </div>
 

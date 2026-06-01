@@ -55,7 +55,7 @@ from budget_alert_store import (
     update_watch_check_result,
     upsert_watch,
 )
-from slack_notifier import send_budget_alert
+from slack_notifier import send_budget_alert, send_slack_test_message
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
@@ -1646,6 +1646,19 @@ def create_app() -> Flask:
             flash(str(e), "danger")
         except Exception as e:
             flash(f"Lỗi: {e}", "danger")
+        return redirect(url_for("budget_alerts_page"))
+
+    @app.post("/budget-alerts/test-slack")
+    def budget_alerts_test_slack():
+        webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        if not webhook:
+            flash("Chưa cấu hình SLACK_WEBHOOK_URL trên server.", "danger")
+            return redirect(url_for("budget_alerts_page"))
+        try:
+            send_slack_test_message(webhook)
+            flash("Đã gửi tin test tới Slack — kiểm tra channel và điện thoại.", "success")
+        except Exception as e:
+            flash(f"Gửi Slack thất bại: {e}", "danger")
         return redirect(url_for("budget_alerts_page"))
 
     register_mcp_routes(

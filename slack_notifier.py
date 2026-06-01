@@ -63,3 +63,19 @@ def send_budget_alert(
     with httpx.Client(timeout=timeout_seconds) as client:
         resp = client.post(url, json=payload)
         resp.raise_for_status()
+
+
+def send_slack_test_message(webhook_url: str, *, timeout_seconds: float = 15.0) -> None:
+    """Gửi tin test để xác nhận webhook + push Slack trên điện thoại."""
+    url = (webhook_url or "").strip()
+    if not url:
+        raise ValueError("SLACK_WEBHOOK_URL chưa cấu hình.")
+    text = (
+        "✅ *Test cảnh báo Google Ads*\n"
+        "Đây là tin nhắn thử từ dashboard. Nếu bạn thấy tin này trên Slack / điện thoại, "
+        "webhook đã cấu hình đúng."
+    )
+    payload = {"text": text, "mrkdwn": True}
+    with httpx.Client(timeout=timeout_seconds) as client:
+        resp = client.post(url, json=payload)
+        resp.raise_for_status()
