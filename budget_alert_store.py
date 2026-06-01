@@ -111,7 +111,11 @@ def upsert_watch(
                 ) VALUES (%(cid)s, %(label)s, %(mid)s, %(active)s, %(now)s, %(now)s)
                 ON CONFLICT (customer_id) DO UPDATE SET
                   mcc_id = EXCLUDED.mcc_id,
-                  label = EXCLUDED.label,
+                  label = CASE
+                    WHEN TRIM(COALESCE(EXCLUDED.label, '')) <> '' THEN EXCLUDED.label
+                    WHEN TRIM(COALESCE(budget_alert_watch.label, '')) <> '' THEN budget_alert_watch.label
+                    ELSE EXCLUDED.label
+                  END,
                   active = EXCLUDED.active,
                   updated_at = EXCLUDED.updated_at
                 """,
@@ -188,6 +192,26 @@ def update_watch_check_result(
                         "days": last_days_remaining,
                     },
                 )
+
+
+def update_watch_label_if_empty(database_url: str, customer_id: str, label: str) -> None:
+    """Ghi tên tài khoản từ API nếu label đang trống."""
+    cid = (customer_id or "").strip().replace("-", "")
+    lab = (label or "").strip()
+    if not cid or not lab:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE budget_alert_watch
+                SET label = %(lab)s, updated_at = %(now)s
+                WHERE customer_id = %(cid)s
+                  AND TRIM(COALESCE(label, '')) = ''
+                """,
+                {"cid": cid, "lab": lab, "now": now},
+            )
 
 
 def set_watch_active(database_url: str, customer_id: str, active: bool) -> bool:

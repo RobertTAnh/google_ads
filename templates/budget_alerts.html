@@ -70,8 +70,8 @@
             </select>
           </div>
           <div class="col-md-3">
-            <label class="form-label">Ghi chú (tuỳ chọn)</label>
-            <input class="form-control" name="label" placeholder="Tên shop">
+            <label class="form-label">Tên tài khoản (tuỳ chọn)</label>
+            <input class="form-control" name="label" placeholder="Tự lấy từ Google Ads nếu để trống">
           </div>
           <div class="col-md-2 d-flex align-items-end">
             <div class="form-check">
@@ -95,7 +95,7 @@
               <tr>
                 <th>CID</th>
                 <th>MCC</th>
-                <th>Label</th>
+                <th>Tên tài khoản</th>
                 <th>NS ngày (ENABLED)</th>
                 <th>NS còn lại</th>
                 <th>~Ngày còn</th>
@@ -110,16 +110,16 @@
                   <td class="font-monospace">{{ r.customer_id | cidfmt }}</td>
                   <td class="font-monospace small">{{ r.mcc_id | cidfmt }}</td>
                   <td>{{ r.label }}</td>
-                  <td class="small">
+                  <td class="small text-end text-nowrap">
                     {% if r.last_total_daily_micros %}
-                      {{ (r.last_total_daily_micros / 1000000) | round(2) }}
+                      {{ (r.last_total_daily_micros / 1000000) | vnd }}
                     {% else %}
                       —
                     {% endif %}
                   </td>
-                  <td class="small">
+                  <td class="small text-end text-nowrap">
                     {% if r.last_remaining_micros is not none %}
-                      {{ (r.last_remaining_micros / 1000000) | round(2) }}
+                      {{ (r.last_remaining_micros / 1000000) | vnd }}
                     {% else %}
                       —
                     {% endif %}

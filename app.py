@@ -53,6 +53,7 @@ from budget_alert_store import (
     list_watch,
     set_watch_active,
     update_watch_check_result,
+    update_watch_label_if_empty,
     upsert_watch,
 )
 from slack_notifier import resolve_account_display_name, send_budget_alert, send_slack_test_message
@@ -471,6 +472,22 @@ def _budget_alert_cooldown_elapsed(last_alert_at: str, cooldown_hours: float) ->
     return datetime.now(ZoneInfo("UTC")) - last >= timedelta(hours=max(0.0, cooldown_hours))
 
 
+def _fetch_google_ads_account_name(
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    mcc_id: str,
+    customer_id: str,
+) -> str:
+    mcc = _normalize_customer_id(mcc_id)
+    cid = _normalize_customer_id(customer_id)
+    if not mcc or not cid:
+        return ""
+    try:
+        client = build_google_ads_client_for_mcc(mcc)
+        return (get_customer_name(client, cid) or "").strip()
+    except Exception:
+        return ""
+
+
 def _run_budget_check_for_watch(
     database_url: str,
     watch: dict,
@@ -496,8 +513,12 @@ def _run_budget_check_for_watch(
 
     client = build_google_ads_client_for_mcc(mcc)
     ev = evaluate_budget_runway(client, cid)
+    stored_label = str(watch.get("label", "")).strip()
+    if not stored_label and ev.customer_name:
+        update_watch_label_if_empty(database_url, cid, ev.customer_name)
+        stored_label = ev.customer_name.strip()
     account_name = resolve_account_display_name(
-        label=str(watch.get("label", "")),
+        label=stored_label,
         customer_name=ev.customer_name,
         customer_id=cid,
     )
@@ -1567,6 +1588,8 @@ def create_app() -> Flask:
         if not mcc:
             flash("Chọn MCC hoặc map CID→MCC trước.", "warning")
             return redirect(url_for("budget_alerts_page"))
+        if not label:
+            label = _fetch_google_ads_account_name(_build_google_ads_client_for_mcc, mcc, cid)
         try:
             upsert_watch(database_url, customer_id=cid, mcc_id=mcc, label=label, active=active)
             flash("Đã thêm CID vào danh sách theo dõi.", "success")
