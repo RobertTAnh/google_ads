@@ -21,8 +21,15 @@
   <div class="card mb-4 border-info">
     <div class="card-header d-flex align-items-center justify-content-between">
       <span class="fw-semibold">Thông báo trên điện thoại (Slack)</span>
-      <form method="post" action="{{ url_for('budget_alerts_test_slack') }}" class="mb-0">
-        <button type="submit" class="btn btn-sm btn-info" {% if not slack_configured %}disabled title="Cần SLACK_WEBHOOK_URL"{% endif %}>
+      <form method="post" action="{{ url_for('budget_alerts_test_slack') }}" class="mb-0 d-flex align-items-center gap-2">
+        {% if database_enabled and rows %}
+          <select class="form-select form-select-sm" name="customer_id" style="max-width: 220px;" title="CID dùng tên trong tin test">
+            {% for r in rows %}
+              <option value="{{ r.customer_id }}">{{ r.label or (r.customer_id | cidfmt) }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+        <button type="submit" class="btn btn-sm btn-info text-nowrap" {% if not slack_configured %}disabled title="Cần SLACK_WEBHOOK_URL"{% endif %}>
           Gửi test Slack
         </button>
       </form>
@@ -36,7 +43,8 @@
       </ol>
       <p class="mb-0 mt-2 text-muted">
         Cooldown giữa các lần gửi lại: {{ cooldown_hours | int }}h (env <code>BUDGET_ALERT_COOLDOWN_HOURS</code>).
-        Nút <strong>Gửi test Slack</strong> gửi tin thử ngay, không cần chờ scheduler.
+        Nút <strong>Gửi test Slack</strong> gửi tin thử cùng format thật:
+        <em>Tài khoản … ngân sách còn 4 ngày - Vui lòng nạp tiền</em> (có tiền tố [TEST]).
       </p>
     </div>
   </div>

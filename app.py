@@ -55,7 +55,7 @@ from budget_alert_store import (
     update_watch_check_result,
     upsert_watch,
 )
-from slack_notifier import send_budget_alert, send_slack_test_message
+from slack_notifier import resolve_account_display_name, send_budget_alert, send_slack_test_message
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
@@ -471,14 +471,6 @@ def _budget_alert_cooldown_elapsed(last_alert_at: str, cooldown_hours: float) ->
     return datetime.now(ZoneInfo("UTC")) - last >= timedelta(hours=max(0.0, cooldown_hours))
 
 
-def _mcc_label_for_id(mcc_id: str, mcc_configs: dict) -> str:
-    mid = _normalize_customer_id(mcc_id)
-    cfg = mcc_configs.get(mid) if mid else None
-    if isinstance(cfg, dict):
-        return str(cfg.get("label") or "").strip()
-    return ""
-
-
 def _run_budget_check_for_watch(
     database_url: str,
     watch: dict,
@@ -504,7 +496,11 @@ def _run_budget_check_for_watch(
 
     client = build_google_ads_client_for_mcc(mcc)
     ev = evaluate_budget_runway(client, cid)
-    mcc_label = _mcc_label_for_id(mcc, mcc_configs)
+    account_name = resolve_account_display_name(
+        label=str(watch.get("label", "")),
+        customer_name=ev.customer_name,
+        customer_id=cid,
+    )
 
     alert_at: Optional[str] = None
     err_msg = ""
@@ -514,17 +510,7 @@ def _run_budget_check_for_watch(
         )
         if can_send and slack_webhook_url:
             try:
-                send_budget_alert(
-                    slack_webhook_url,
-                    cid=cid,
-                    name=ev.customer_name or str(watch.get("label", "")),
-                    total_daily_micros=ev.total_daily_micros,
-                    remaining_micros=ev.remaining_micros,
-                    days_est=ev.days_remaining,
-                    mcc_id=mcc,
-                    mcc_label=mcc_label,
-                    currency_code=ev.currency_code,
-                )
+                send_budget_alert(slack_webhook_url, account_name=account_name)
                 alert_at = datetime.now(ZoneInfo("UTC")).isoformat()
             except Exception as ex:
                 err_msg = f"Slack: {ex}"
@@ -1654,9 +1640,43 @@ def create_app() -> Flask:
         if not webhook:
             flash("Chưa cấu hình SLACK_WEBHOOK_URL trên server.", "danger")
             return redirect(url_for("budget_alerts_page"))
+        test_cid = _normalize_customer_id(request.form.get("customer_id", ""))
+        account_name = "Tài khoản mẫu"
+        if database_url:
+            watches = list_watch(database_url, active_only=False)
+            watch = None
+            if test_cid:
+                for w in watches:
+                    if _normalize_customer_id(str(w.get("customer_id", ""))) == test_cid:
+                        watch = w
+                        break
+            elif watches:
+                watch = watches[0]
+            if watch:
+                account_name = resolve_account_display_name(
+                    label=str(watch.get("label", "")),
+                    customer_id=str(watch.get("customer_id", "")),
+                )
+                mcc = _normalize_customer_id(str(watch.get("mcc_id", ""))) or _normalize_customer_id(
+                    lookup_mcc_for_customer(database_url, str(watch.get("customer_id", ""))) or ""
+                )
+                if mcc and not (watch.get("label") or "").strip():
+                    try:
+                        client = _build_google_ads_client_for_mcc(mcc)
+                        api_name = get_customer_name(client, str(watch.get("customer_id", "")))
+                        account_name = resolve_account_display_name(
+                            label="",
+                            customer_name=api_name,
+                            customer_id=str(watch.get("customer_id", "")),
+                        )
+                    except Exception:
+                        pass
         try:
-            send_slack_test_message(webhook)
-            flash("Đã gửi tin test tới Slack — kiểm tra channel và điện thoại.", "success")
+            send_slack_test_message(webhook, account_name=account_name)
+            flash(
+                f"Đã gửi tin test tới Slack (mẫu: {account_name}) — kiểm tra channel và điện thoại.",
+                "success",
+            )
         except Exception as e:
             flash(f"Gửi Slack thất bại: {e}", "danger")
         return redirect(url_for("budget_alerts_page"))
