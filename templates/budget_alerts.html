@@ -7,7 +7,7 @@
     <div>
       <h1 class="h3 mb-1">Cảnh báo ngân sách</h1>
       <div class="text-muted">
-        Theo dõi CID thủ công — scheduler chạy mỗi {{ interval_hours | round(1) }}h, gửi Slack khi tổng NS ngày (ENABLED) × 4 &gt; NS tài khoản còn lại.
+        Theo dõi CID thủ công — scheduler crawl và gửi Slack lúc {{ schedule_label }} ({{ budget_alert_timezone }}), khi tổng NS ngày (ENABLED) × 4 &gt; NS tài khoản còn lại.
       </div>
     </div>
   </div>
@@ -42,9 +42,9 @@
         <li>Cài app Slack trên điện thoại → bật push notification cho channel đó.</li>
       </ol>
       <p class="mb-0 mt-2 text-muted">
-        Cooldown giữa các lần gửi lại: {{ cooldown_hours | int }}h (env <code>BUDGET_ALERT_COOLDOWN_HOURS</code>).
+        Lịch tự động: {{ schedule_label }} (env <code>BUDGET_ALERT_SCHEDULE_HOURS</code>, múi giờ <code>BUDGET_ALERT_TIMEZONE</code>).
         Nút <strong>Gửi test Slack</strong> gửi tin thử cùng format thật:
-        <em>Tài khoản … ngân sách còn 4 ngày - Vui lòng nạp tiền</em> (có tiền tố [TEST]).
+        <em>Tài khoản … ngân sách còn X ngày - Vui lòng nạp tiền</em> (X = cột ~Ngày còn hoặc 4.0 mẫu; có tiền tố [TEST]).
       </p>
     </div>
   </div>

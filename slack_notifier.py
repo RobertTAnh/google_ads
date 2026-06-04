@@ -32,9 +32,19 @@ def resolve_account_display_name(
     return cid_fmt or "Tài khoản"
 
 
-def format_budget_alert_text(account_name: str, *, is_test: bool = False) -> str:
+def _format_days_remaining(days_remaining: float) -> str:
+    return f"{days_remaining:.1f}"
+
+
+def format_budget_alert_text(
+    account_name: str,
+    *,
+    days_remaining: float,
+    is_test: bool = False,
+) -> str:
     name = (account_name or "").strip() or "Tài khoản"
-    text = f"Tài khoản {name} ngân sách còn 4 ngày - Vui lòng nạp tiền"
+    days_str = _format_days_remaining(days_remaining)
+    text = f"Tài khoản {name} ngân sách còn {days_str} ngày - Vui lòng nạp tiền"
     if is_test:
         text = f"[TEST] {text}"
     return text
@@ -54,10 +64,11 @@ def send_budget_alert(
     webhook_url: str,
     *,
     account_name: str,
+    days_remaining: float,
     timeout_seconds: float = 15.0,
 ) -> None:
     """Gửi cảnh báo ngân sách thực tế."""
-    text = format_budget_alert_text(account_name, is_test=False)
+    text = format_budget_alert_text(account_name, days_remaining=days_remaining, is_test=False)
     _post_slack_text(webhook_url, text, timeout_seconds=timeout_seconds)
 
 
@@ -65,8 +76,9 @@ def send_slack_test_message(
     webhook_url: str,
     *,
     account_name: str,
+    days_remaining: float,
     timeout_seconds: float = 15.0,
 ) -> None:
     """Gửi tin test cùng format cảnh báo thật."""
-    text = format_budget_alert_text(account_name, is_test=True)
+    text = format_budget_alert_text(account_name, days_remaining=days_remaining, is_test=True)
     _post_slack_text(webhook_url, text, timeout_seconds=timeout_seconds)

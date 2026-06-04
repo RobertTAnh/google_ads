@@ -68,6 +68,8 @@ _CID_SYNC_LEADER_LOCK_ID = 8104202602
 _BUDGET_ALERT_SCHEDULER_STARTED = False
 _BUDGET_ALERT_START_LOCK = threading.Lock()
 _BUDGET_ALERT_LEADER_LOCK_ID = 8104202603
+_DEFAULT_BUDGET_ALERT_HOURS = (11, 15, 21, 23)
+_last_budget_alert_slot_key: Optional[str] = None
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -450,26 +452,61 @@ def _acquire_budget_alert_leader(database_url: str) -> Optional[psycopg.Connecti
         return None
 
 
-def _parse_iso_utc(ts: str) -> Optional[datetime]:
-    raw = (ts or "").strip()
-    if not raw:
-        return None
-    try:
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        dt = datetime.fromisoformat(raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt.astimezone(ZoneInfo("UTC"))
-    except ValueError:
-        return None
+def _budget_alert_timezone() -> str:
+    return (os.getenv("BUDGET_ALERT_TIMEZONE") or "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
 
 
-def _budget_alert_cooldown_elapsed(last_alert_at: str, cooldown_hours: float) -> bool:
-    last = _parse_iso_utc(last_alert_at)
-    if last is None:
-        return True
-    return datetime.now(ZoneInfo("UTC")) - last >= timedelta(hours=max(0.0, cooldown_hours))
+def _parse_budget_alert_schedule_hours() -> tuple[int, ...]:
+    raw = (os.getenv("BUDGET_ALERT_SCHEDULE_HOURS") or "11,15,21,23").strip()
+    hours: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h = int(part)
+        except ValueError:
+            continue
+        if 0 <= h <= 23:
+            hours.append(h)
+    if not hours:
+        return _DEFAULT_BUDGET_ALERT_HOURS
+    return tuple(sorted(set(hours)))
+
+
+def _budget_alert_slot_key(slot_dt: datetime) -> str:
+    return f"{slot_dt.date().isoformat()}-{slot_dt.hour}"
+
+
+def _next_budget_alert_slot(tz_name: Optional[str] = None) -> tuple[float, datetime]:
+    """Số giây tới slot tiếp theo và thời điểm slot (theo múi giờ cảnh báo)."""
+    tz = _safe_tz(tz_name or _budget_alert_timezone())
+    now = datetime.now(tz)
+    hours = _parse_budget_alert_schedule_hours()
+    candidates: list[datetime] = []
+    for h in hours:
+        target = now.replace(hour=h, minute=0, second=0, microsecond=0)
+        if now < target:
+            candidates.append(target)
+    if not candidates:
+        tomorrow = now.date() + timedelta(days=1)
+        first_h = hours[0]
+        candidates.append(
+            datetime(tomorrow.year, tomorrow.month, tomorrow.day, first_h, 0, 0, tzinfo=tz)
+        )
+    next_slot = min(candidates)
+    wait_sec = max(0.0, (next_slot - now).total_seconds())
+    return wait_sec, next_slot
+
+
+def _seconds_until_next_budget_alert_slot(tz_name: Optional[str] = None) -> float:
+    wait_sec, _ = _next_budget_alert_slot(tz_name)
+    return wait_sec
+
+
+def _format_budget_alert_schedule_label() -> str:
+    hours = _parse_budget_alert_schedule_hours()
+    return ", ".join(f"{h:02d}:00" for h in hours)
 
 
 def _fetch_google_ads_account_name(
@@ -495,8 +532,6 @@ def _run_budget_check_for_watch(
     build_google_ads_client_for_mcc: Callable[[str], Any],
     mcc_configs: dict,
     slack_webhook_url: str,
-    cooldown_hours: float,
-    bypass_cooldown: bool = False,
 ) -> BudgetRunwayEvaluation:
     cid = _normalize_customer_id(str(watch.get("customer_id", "")))
     mcc = _normalize_customer_id(str(watch.get("mcc_id", "")))
@@ -526,19 +561,20 @@ def _run_budget_check_for_watch(
     alert_at: Optional[str] = None
     err_msg = ""
     if ev.should_alert:
-        can_send = bypass_cooldown or _budget_alert_cooldown_elapsed(
-            str(watch.get("last_alert_at", "")), cooldown_hours
-        )
-        if can_send and slack_webhook_url:
+        if ev.days_remaining is None:
+            err_msg = "Không có số ngày còn để gửi cảnh báo."
+        elif slack_webhook_url:
             try:
-                send_budget_alert(slack_webhook_url, account_name=account_name)
+                send_budget_alert(
+                    slack_webhook_url,
+                    account_name=account_name,
+                    days_remaining=ev.days_remaining,
+                )
                 alert_at = datetime.now(ZoneInfo("UTC")).isoformat()
             except Exception as ex:
                 err_msg = f"Slack: {ex}"
-        elif can_send and not slack_webhook_url:
+        else:
             err_msg = "SLACK_WEBHOOK_URL chưa cấu hình."
-        elif not can_send:
-            err_msg = f"Đang trong cooldown ({cooldown_hours:g}h)."
     elif ev.status == "ok":
         alert_at = ""
 
@@ -574,19 +610,30 @@ def _maybe_start_budget_alert_scheduler(
     log = logging.getLogger(__name__)
 
     def _runner() -> None:
-        interval = max(
-            300,
-            int((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600),
-        )
-        cooldown_hours = float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6)
+        global _last_budget_alert_slot_key
         webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        tz_name = _budget_alert_timezone()
         while True:
+            wait_sec, slot_dt = _next_budget_alert_slot(tz_name)
+            log.info(
+                "Budget alert scheduler: chờ %.0fs tới slot %s (%s)",
+                wait_sec,
+                _budget_alert_slot_key(slot_dt),
+                tz_name,
+            )
+            time.sleep(wait_sec)
+            slot_key = _budget_alert_slot_key(slot_dt)
+            if slot_key == _last_budget_alert_slot_key:
+                time.sleep(60)
+                continue
             leader_conn: Optional[psycopg.Connection] = None
             try:
                 leader_conn = _acquire_budget_alert_leader(database_url)
                 if leader_conn is None:
                     time.sleep(60)
                     continue
+                _last_budget_alert_slot_key = slot_key
+                log.info("Budget alert scheduler: chạy slot %s", slot_key)
                 watches = list_watch(database_url, active_only=True)
                 for w in watches:
                     try:
@@ -596,8 +643,6 @@ def _maybe_start_budget_alert_scheduler(
                             build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
                             mcc_configs=mcc_configs,
                             slack_webhook_url=webhook,
-                            cooldown_hours=cooldown_hours,
-                            bypass_cooldown=False,
                         )
                     except GoogleAdsHelperError as ex:
                         log.warning("Budget alert check %s: %s", w.get("customer_id"), ex)
@@ -628,7 +673,6 @@ def _maybe_start_budget_alert_scheduler(
                         leader_conn.close()
                     except Exception:
                         pass
-            time.sleep(interval)
 
     th = threading.Thread(target=_runner, daemon=True, name="budget-alert-scheduler")
     th.start()
@@ -1555,9 +1599,8 @@ def create_app() -> Flask:
                 database_enabled=False,
                 mcc_options=_mcc_options_for_ui(),
                 slack_configured=bool((os.getenv("SLACK_WEBHOOK_URL") or "").strip()),
-                cooldown_hours=float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6),
-                interval_hours=float((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600)
-                / 3600.0,
+                schedule_label=_format_budget_alert_schedule_label(),
+                budget_alert_timezone=_budget_alert_timezone(),
             )
         rows = list_watch(database_url)
         return render_template(
@@ -1566,9 +1609,8 @@ def create_app() -> Flask:
             database_enabled=True,
             mcc_options=_mcc_options_for_ui(),
             slack_configured=bool((os.getenv("SLACK_WEBHOOK_URL") or "").strip()),
-            cooldown_hours=float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6),
-            interval_hours=float((os.getenv("BUDGET_ALERT_INTERVAL_SECONDS") or "21600").strip() or 21600)
-            / 3600.0,
+            schedule_label=_format_budget_alert_schedule_label(),
+            budget_alert_timezone=_budget_alert_timezone(),
         )
 
     @app.post("/budget-alerts/add")
@@ -1636,7 +1678,6 @@ def create_app() -> Flask:
             flash("CID không có trong danh sách theo dõi.", "warning")
             return redirect(url_for("budget_alerts_page"))
         webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
-        cooldown_hours = float((os.getenv("BUDGET_ALERT_COOLDOWN_HOURS") or "6").strip() or 6)
         try:
             ev = _run_budget_check_for_watch(
                 database_url,
@@ -1644,8 +1685,6 @@ def create_app() -> Flask:
                 build_google_ads_client_for_mcc=_build_google_ads_client_for_mcc,
                 mcc_configs=mcc_configs,
                 slack_webhook_url=webhook,
-                cooldown_hours=cooldown_hours,
-                bypass_cooldown=True,
             )
             if ev.should_alert:
                 flash(f"Đã kiểm tra — cảnh báo: {ev.message}", "warning")
@@ -1665,9 +1704,9 @@ def create_app() -> Flask:
             return redirect(url_for("budget_alerts_page"))
         test_cid = _normalize_customer_id(request.form.get("customer_id", ""))
         account_name = "Tài khoản mẫu"
+        watch = None
         if database_url:
             watches = list_watch(database_url, active_only=False)
-            watch = None
             if test_cid:
                 for w in watches:
                     if _normalize_customer_id(str(w.get("customer_id", ""))) == test_cid:
@@ -1694,10 +1733,17 @@ def create_app() -> Flask:
                         )
                     except Exception:
                         pass
+        test_days = 4.0
+        if watch is not None and watch.get("last_days_remaining") is not None:
+            test_days = float(watch["last_days_remaining"])
         try:
-            send_slack_test_message(webhook, account_name=account_name)
+            send_slack_test_message(
+                webhook,
+                account_name=account_name,
+                days_remaining=test_days,
+            )
             flash(
-                f"Đã gửi tin test tới Slack (mẫu: {account_name}) — kiểm tra channel và điện thoại.",
+                f"Đã gửi tin test tới Slack (mẫu: {account_name}, ~{test_days:.1f} ngày) — kiểm tra channel và điện thoại.",
                 "success",
             )
         except Exception as e:
