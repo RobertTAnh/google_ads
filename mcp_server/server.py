@@ -9,7 +9,7 @@ Biến môi trường:
   MCP_API_KEY              trùng với MCP_API_KEY trên server Flask
 
 Kỳ báo cáo:
-  date_range: YESTERDAY | LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS
+  date_range: TODAY | YESTERDAY | LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS
   hoặc start_date + end_date (YYYY-MM-DD) — ưu tiên hơn date_range
 """
 
@@ -27,7 +27,7 @@ mcp = FastMCP(
     instructions=(
         "Tools gọi Google Ads qua server deploy. Bắt buộc customer_id (CID 10 số). "
         "Nếu server có DATABASE_URL và đã lưu map CID→MCC, có thể bỏ qua mcc_id — dùng ads_resolve_mcc(customer_id) khi cần kiểm tra. "
-        "Kỳ: date_range (YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS) "
+        "Kỳ: date_range (TODAY, YESTERDAY, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS) "
         "hoặc start_date + end_date (YYYY-MM-DD, ví dụ từ 2026-05-05). "
         "Nhiều MCC: truyền mcc_id. CPA trong JSON metrics = cost/conversions. "
         "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range). "

@@ -85,7 +85,7 @@ class KeywordPerformanceRow:
 
 
 # GAQL predefined date ranges (segments.date DURING …). Dùng cho MCP / báo cáo kỳ.
-ALLOWED_MCP_DATE_RANGES: Tuple[str, ...] = ("YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS")
+ALLOWED_MCP_DATE_RANGES: Tuple[str, ...] = ("TODAY", "YESTERDAY", "LAST_7_DAYS", "LAST_14_DAYS", "LAST_30_DAYS")
 _MCP_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Google Ads API bắt buộc LIMIT trên change_event; 10000 là trần nền tảng (không phải giới hạn app).
 CHANGE_EVENT_GAQL_LIMIT = 10000

@@ -30,7 +30,7 @@ Các route dữ liệu cần header:
 
 Query thường dùng:
 
-- **`date_range`** (GAQL `DURING`, chung cho các route metrics): `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua.
+- **`date_range`** (GAQL `DURING`, chung cho các route metrics): `TODAY` | `YESTERDAY` | `LAST_7_DAYS` | `LAST_14_DAYS` | `LAST_30_DAYS`. Mặc định `YESTERDAY` nếu bỏ qua. (`TODAY` có thể chưa đủ số liệu cho đến cuối ngày — Google Ads cập nhật theo giờ.)
 - **`start_date`** + **`end_date`** (tùy chọn, `YYYY-MM-DD`): khoảng tùy chỉnh qua GAQL `BETWEEN` — **ưu tiên hơn** `date_range` khi truyền đủ cả hai (không giới hạn độ dài phía app; Google Ads có thể từ chối khoảng quá dài).
 - **`cpa`** trong JSON: `cost / conversions` khi có conversion; không có conversion thì `null`.
 
