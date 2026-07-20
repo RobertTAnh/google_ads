@@ -43,9 +43,11 @@ Query thường dùng:
 | Metrics cấp tài khoản (gộp kỳ + CPA) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Keyword (gộp kỳ, mọi dòng có metrics) | GET | `/mcp/v1/keyword_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Cụm từ tìm kiếm thực tế (gộp kỳ) | GET | `/mcp/v1/search_term_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
+| **Search term insights PMax** (gộp kỳ) | GET | `/mcp/v1/pmax_search_term_insights` | `customer_id`, `mcc_id?`, `campaign_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Campaign + ngân sách ngày + metrics kỳ + CPA | GET | `/mcp/v1/campaign_budget_metrics` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quảng cáo (ad) + metrics kỳ | GET | `/mcp/v1/ad_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Từ khóa phủ định (snapshot) | GET | `/mcp/v1/negative_keywords` | `customer_id`, `mcc_id?` (`date_range` không dùng) |
+| **Khám phá từ khóa mới** (Keyword Planner / GenerateKeywordIdeas) | GET hoặc POST | `/mcp/v1/generate_keyword_ideas` | `customer_id`, `keywords` (seed, CSV) hoặc `page_url`, `mcc_id?`, `language_id?` (mặc định `1040` VI), `location_ids?` (mặc định `2704` VN), `keyword_plan_network?`, `page_size?` |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |
 | Đối tượng (audience) + metrics kỳ | GET | `/mcp/v1/audience_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
@@ -129,7 +131,7 @@ Cách cũ (vẫn được nếu set đúng `cwd`):
 "cwd": "D:\\1 Code App\\gg ads API"
 ```
 
-Khởi động lại Claude Desktop. Trong chat, thử nhờ Claude dùng **`ads_list_child_accounts`**, **`ads_campaign_performance`** (`date_range` = `LAST_7_DAYS` hoặc `LAST_30_DAYS`), **`ads_search_term_performance`**, **`ads_campaign_budget_metrics`** với `customer_id` thật.
+Khởi động lại Claude Desktop. Trong chat, thử nhờ Claude dùng **`ads_list_child_accounts`**, **`ads_campaign_performance`** (`date_range` = `LAST_7_DAYS` hoặc `LAST_30_DAYS`), **`ads_search_term_performance`** (Search), **`ads_pmax_search_term_insights`** (PMax), **`ads_campaign_budget_metrics`** với `customer_id` thật.
 
 ---
 

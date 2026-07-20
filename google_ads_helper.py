@@ -173,6 +173,26 @@ class SearchTermPeriodMetricsRow:
 
 
 @dataclass(frozen=True)
+class PmaxSearchTermInsightRow:
+    """Search term insights cho PMax (campaign_search_term_insight), gộp theo kỳ."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    insight_id: str
+    category_label: str
+    search_subcategory: str
+    search_term: str
+    date_range: str
+    clicks: int
+    impressions: int
+    cost: float
+    conversions: float
+    cpa: Optional[float]
+
+
+@dataclass(frozen=True)
 class CampaignBudgetPeriodRow:
     """Campaign + ngân sách ngày (amount_micros) + metrics gộp trong kỳ — phục vụ CPA / pacing."""
 
@@ -224,6 +244,19 @@ class NegativeKeywordRow:
     criterion_id: str
     keyword_text: str
     match_type: str
+
+
+@dataclass(frozen=True)
+class KeywordIdeaRow:
+    """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
+
+    keyword_text: str
+    avg_monthly_searches: int
+    competition: str
+    competition_index: Optional[int]
+    low_top_of_page_bid: Optional[float]
+    high_top_of_page_bid: Optional[float]
+    monthly_search_volumes: Tuple[Dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -825,7 +858,7 @@ def get_campaign_metrics_for_date_range(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> List[CampaignPeriodMetricsRow]:
-    """Gộp metrics theo campaign trong kỳ (ENABLED + PAUSED)."""
+    """Gộp metrics theo campaign đang bật (ENABLED) trong kỳ."""
     df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
@@ -840,7 +873,7 @@ def get_campaign_metrics_for_date_range(
           metrics.conversions
         FROM campaign
         WHERE segments.date {df.gaql_predicate}
-          AND campaign.status IN (ENABLED, PAUSED)
+          AND campaign.status = ENABLED
     """.strip()
 
     out: List[CampaignPeriodMetricsRow] = []
@@ -1106,6 +1139,270 @@ def get_search_term_metrics_for_date_range(
     return out
 
 
+def _list_performance_max_campaigns(
+    ga_service: Any,
+    customer_id: str,
+    *,
+    campaign_id: Optional[str] = None,
+) -> List[Tuple[str, str]]:
+    cap_filter = ""
+    if campaign_id:
+        cap_filter = f"\n          AND campaign.id = {int(campaign_id)}"
+    query = f"""
+        SELECT
+          campaign.id,
+          campaign.name
+        FROM campaign
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND campaign.status = ENABLED{cap_filter}
+        ORDER BY campaign.name
+    """.strip()
+    out: List[Tuple[str, str]] = []
+    stream = ga_service.search_stream(customer_id=customer_id, query=query)
+    for batch in stream:
+        for r in batch.results:
+            out.append((str(r.campaign.id), str(r.campaign.name or "")))
+    return out
+
+
+def _collect_pmax_search_term_insight_terms(
+    ga_service: Any,
+    customer_id: str,
+    *,
+    date_predicate: str,
+    insight_resource: str,
+    campaign_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Lấy insight categories (bỏ id=0 vì Google không trả search_term cho id này)."""
+    cap_filter = ""
+    if campaign_id:
+        cap_filter = f"\n          AND {insight_resource}.campaign_id = {int(campaign_id)}"
+    query = f"""
+        SELECT
+          {insight_resource}.id,
+          {insight_resource}.category_label,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.conversions
+        FROM {insight_resource}
+        WHERE segments.date {date_predicate}{cap_filter}
+    """.strip()
+
+    insights: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    stream = ga_service.search_stream(customer_id=customer_id, query=query)
+    for batch in stream:
+        for r in batch.results:
+            insight = getattr(r, insight_resource)
+            insight_id = str(insight.id)
+            if insight_id == "0" or insight_id in seen:
+                continue
+            seen.add(insight_id)
+            insights.append(
+                {
+                    "insight_id": insight_id,
+                    "category_label": str(insight.category_label or ""),
+                }
+            )
+    return insights
+
+
+def _fetch_pmax_search_terms_for_insights(
+    ga_service: Any,
+    customer_id: str,
+    *,
+    date_predicate: str,
+    insight_resource: str,
+    insights: Iterable[Dict[str, Any]],
+    campaign_id: Optional[str] = None,
+) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    """Gộp search term theo (insight_id, subcategory, term)."""
+    acc: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for insight in insights:
+        cap_filter = ""
+        if campaign_id:
+            cap_filter = f"\n          AND {insight_resource}.campaign_id = {int(campaign_id)}"
+        term_query = f"""
+            SELECT
+              segments.search_subcategory,
+              segments.search_term,
+              metrics.clicks,
+              metrics.impressions,
+              metrics.conversions
+            FROM {insight_resource}
+            WHERE segments.date {date_predicate}
+              AND {insight_resource}.id = {int(insight["insight_id"])}{cap_filter}
+        """.strip()
+        term_stream = ga_service.search_stream(customer_id=customer_id, query=term_query)
+        for batch in term_stream:
+            for r in batch.results:
+                subcat = str(r.segments.search_subcategory or "")
+                term = str(r.segments.search_term or "")
+                if not term:
+                    continue
+                key = (insight["insight_id"], subcat, term)
+                if key not in acc:
+                    acc[key] = {
+                        "insight_id": insight["insight_id"],
+                        "category_label": insight["category_label"],
+                        "search_subcategory": subcat,
+                        "search_term": term,
+                        "clicks": 0,
+                        "impressions": 0,
+                        "conversions": 0.0,
+                    }
+                a = acc[key]
+                a["clicks"] += int(r.metrics.clicks or 0)
+                a["impressions"] += int(r.metrics.impressions or 0)
+                a["conversions"] += float(r.metrics.conversions or 0.0)
+    return acc
+
+
+def get_pmax_search_term_insights_for_date_range(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    date_range: str = "LAST_7_DAYS",
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> List[PmaxSearchTermInsightRow]:
+    """
+    Search term insights cho Performance Max.
+
+    Thử `campaign_search_term_insight` trước; nếu không có term (thường gặp khi chỉ có insight id=0),
+    fallback sang `customer_search_term_insight` (cấp tài khoản — Google không luôn expose term theo campaign).
+    """
+    df = resolve_mcp_date_filter(date_range=date_range, start_date=start_date, end_date=end_date)
+    ga_service = client.get_service("GoogleAdsService")
+    out: List[PmaxSearchTermInsightRow] = []
+
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        try:
+            campaigns = _list_performance_max_campaigns(
+                ga_service, cid, campaign_id=campaign_id
+            )
+            if not campaigns:
+                continue
+
+            customer_name = ""
+            campaign_rows_found = False
+            for cap_id, cap_name in campaigns:
+                insight_query = f"""
+                    SELECT customer.descriptive_name
+                    FROM campaign
+                    WHERE campaign.id = {int(cap_id)}
+                    LIMIT 1
+                """.strip()
+                for batch in ga_service.search_stream(customer_id=cid, query=insight_query):
+                    for r in batch.results:
+                        customer_name = str(r.customer.descriptive_name or "")
+
+                insights = _collect_pmax_search_term_insight_terms(
+                    ga_service,
+                    cid,
+                    date_predicate=df.gaql_predicate,
+                    insight_resource="campaign_search_term_insight",
+                    campaign_id=cap_id,
+                )
+                acc = _fetch_pmax_search_terms_for_insights(
+                    ga_service,
+                    cid,
+                    date_predicate=df.gaql_predicate,
+                    insight_resource="campaign_search_term_insight",
+                    insights=insights,
+                    campaign_id=cap_id,
+                )
+                if not acc:
+                    continue
+                campaign_rows_found = True
+                ranked = sorted(acc.values(), key=lambda a: a["clicks"], reverse=True)
+                for a in ranked:
+                    out.append(
+                        PmaxSearchTermInsightRow(
+                            customer_id=cid,
+                            customer_name=customer_name,
+                            campaign_id=cap_id,
+                            campaign_name=cap_name,
+                            insight_id=a["insight_id"],
+                            category_label=a["category_label"],
+                            search_subcategory=a["search_subcategory"],
+                            search_term=a["search_term"],
+                            date_range=df.label,
+                            clicks=int(a["clicks"]),
+                            impressions=int(a["impressions"]),
+                            cost=0.0,
+                            conversions=float(a["conversions"]),
+                            cpa=None,
+                        )
+                    )
+
+            if campaign_rows_found:
+                continue
+
+            # Fallback: customer_search_term_insight (Google thường chỉ trả insight id=0 ở campaign level).
+            fallback_cap_id = ""
+            fallback_cap_name = ""
+            if len(campaigns) == 1:
+                fallback_cap_id, fallback_cap_name = campaigns[0]
+            elif campaign_id and campaigns:
+                fallback_cap_id, fallback_cap_name = campaigns[0]
+
+            customer_insights = _collect_pmax_search_term_insight_terms(
+                ga_service,
+                cid,
+                date_predicate=df.gaql_predicate,
+                insight_resource="customer_search_term_insight",
+            )
+            acc = _fetch_pmax_search_terms_for_insights(
+                ga_service,
+                cid,
+                date_predicate=df.gaql_predicate,
+                insight_resource="customer_search_term_insight",
+                insights=customer_insights,
+            )
+            ranked = sorted(acc.values(), key=lambda a: a["clicks"], reverse=True)
+            for a in ranked:
+                out.append(
+                    PmaxSearchTermInsightRow(
+                        customer_id=cid,
+                        customer_name=customer_name,
+                        campaign_id=fallback_cap_id,
+                        campaign_name=fallback_cap_name,
+                        insight_id=a["insight_id"],
+                        category_label=a["category_label"],
+                        search_subcategory=a["search_subcategory"],
+                        search_term=a["search_term"],
+                        date_range=df.label,
+                        clicks=int(a["clicks"]),
+                        impressions=int(a["impressions"]),
+                        cost=0.0,
+                        conversions=float(a["conversions"]),
+                        cpa=None,
+                    )
+                )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error for campaign_search_term_insight customer {cid}:\n"
+                f"{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
+            (x.campaign_name or "").lower(),
+            (x.category_label or "").lower(),
+            (x.search_term or "").lower(),
+        )
+    )
+    return out
+
+
 def get_campaign_budget_metrics_for_date_range(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
@@ -1132,7 +1429,7 @@ def get_campaign_budget_metrics_for_date_range(
           metrics.conversions
         FROM campaign
         WHERE segments.date {df.gaql_predicate}
-          AND campaign.status IN (ENABLED, PAUSED)
+          AND campaign.status = ENABLED
     """.strip()
 
     out: List[CampaignBudgetPeriodRow] = []
@@ -1415,7 +1712,7 @@ def get_ad_performance_for_date_range(
           metrics.conversions
         FROM ad_group_ad
         WHERE segments.date {df.gaql_predicate}
-          AND ad_group_ad.status IN (ENABLED, PAUSED)
+          AND ad_group_ad.status = ENABLED
     """.strip()
 
     out: List[AdPeriodMetricsRow] = []
@@ -1868,7 +2165,7 @@ def get_auction_insights_for_campaigns(
         FROM campaign
         WHERE segments.date {df.gaql_predicate}
           AND campaign.advertising_channel_type = 'SEARCH'
-          AND campaign.status IN (ENABLED, PAUSED){cap_filter}
+          AND campaign.status = ENABLED{cap_filter}
     """.strip()
 
     out: List[AuctionInsightRow] = []
@@ -2811,4 +3108,158 @@ def evaluate_budget_runway(
         status=status,
         message=msg,
     )
+
+
+# Language / geo criterion IDs phổ biến (Keyword Planner).
+# https://developers.google.com/google-ads/api/data/codes-formats#languages
+# https://developers.google.com/google-ads/api/data/geotargets
+DEFAULT_KEYWORD_PLAN_LANGUAGE_ID = "1040"  # Vietnamese
+DEFAULT_KEYWORD_PLAN_LOCATION_IDS: Tuple[str, ...] = ("2704",)  # Vietnam
+
+
+def generate_keyword_ideas(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    keywords: Optional[Iterable[str]] = None,
+    page_url: str = "",
+    language_id: str = DEFAULT_KEYWORD_PLAN_LANGUAGE_ID,
+    location_ids: Optional[Iterable[str]] = None,
+    keyword_plan_network: str = "GOOGLE_SEARCH_AND_PARTNERS",
+    include_adult_keywords: bool = False,
+    page_size: int = 0,
+) -> List[KeywordIdeaRow]:
+    """
+    Mở rộng từ khóa mới từ seed (giống UI «Khám phá các từ khóa mới»).
+
+    Cần ít nhất một trong: keywords (danh sách seed) hoặc page_url.
+    location_ids: criterion ID geo (mặc định Việt Nam 2704).
+    language_id: criterion ID ngôn ngữ (mặc định tiếng Việt 1040).
+    page_size: giới hạn số ý tưởng trả về (0 = lấy hết trang API trả về).
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("Thiếu customer_id hợp lệ để GenerateKeywordIdeas.")
+
+    seed_keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    url = (page_url or "").strip()
+    if not seed_keywords and not url:
+        raise GoogleAdsHelperError(
+            "Cần ít nhất một từ khóa seed (keywords) hoặc page_url để GenerateKeywordIdeas."
+        )
+
+    lang = str(language_id or DEFAULT_KEYWORD_PLAN_LANGUAGE_ID).strip()
+    if not lang.isdigit():
+        raise GoogleAdsHelperError(f"language_id không hợp lệ: {language_id!r}")
+
+    locs_raw = list(location_ids) if location_ids is not None else list(DEFAULT_KEYWORD_PLAN_LOCATION_IDS)
+    locs: List[str] = []
+    for loc in locs_raw:
+        s = str(loc).strip()
+        if not s:
+            continue
+        if not s.isdigit():
+            raise GoogleAdsHelperError(f"location_id không hợp lệ: {loc!r}")
+        locs.append(s)
+    if not locs:
+        raise GoogleAdsHelperError("Cần ít nhất một location_id (geo target).")
+
+    network_name = (keyword_plan_network or "GOOGLE_SEARCH_AND_PARTNERS").strip().upper()
+    network_enum = client.enums.KeywordPlanNetworkEnum
+    network_value = getattr(network_enum, network_name, None)
+    if network_value is None:
+        raise GoogleAdsHelperError(
+            f"keyword_plan_network không hợp lệ: {keyword_plan_network!r}. "
+            "Dùng GOOGLE_SEARCH hoặc GOOGLE_SEARCH_AND_PARTNERS."
+        )
+
+    idea_service = client.get_service("KeywordPlanIdeaService")
+    ga_service = client.get_service("GoogleAdsService")
+
+    request = client.get_type("GenerateKeywordIdeasRequest")
+    request.customer_id = cid
+    request.language = ga_service.language_constant_path(lang)
+    request.geo_target_constants.extend(
+        [ga_service.geo_target_constant_path(loc) for loc in locs]
+    )
+    request.include_adult_keywords = bool(include_adult_keywords)
+    request.keyword_plan_network = network_value
+
+    if seed_keywords and not url:
+        request.keyword_seed.keywords.extend(seed_keywords)
+    elif url and not seed_keywords:
+        request.url_seed.url = url
+    else:
+        request.keyword_and_url_seed.url = url
+        request.keyword_and_url_seed.keywords.extend(seed_keywords)
+
+    try:
+        response = idea_service.generate_keyword_ideas(request=request)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error GenerateKeywordIdeas for {cid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error GenerateKeywordIdeas for {cid}: {ex}") from ex
+
+    limit = int(page_size) if page_size and int(page_size) > 0 else 0
+    out: List[KeywordIdeaRow] = []
+    for idea in response:
+        metrics = getattr(idea, "keyword_idea_metrics", None)
+        avg = int(getattr(metrics, "avg_monthly_searches", 0) or 0) if metrics else 0
+        competition = _proto_enum_name(getattr(metrics, "competition", None)) if metrics else ""
+        comp_idx_raw = getattr(metrics, "competition_index", None) if metrics else None
+        try:
+            competition_index = int(comp_idx_raw) if comp_idx_raw is not None else None
+        except (TypeError, ValueError):
+            competition_index = None
+
+        low_bid = _micros_to_currency(getattr(metrics, "low_top_of_page_bid_micros", None)) if metrics else None
+        high_bid = _micros_to_currency(getattr(metrics, "high_top_of_page_bid_micros", None)) if metrics else None
+
+        volumes: List[Dict[str, Any]] = []
+        if metrics is not None:
+            for mv in getattr(metrics, "monthly_search_volumes", []) or []:
+                try:
+                    month_raw = getattr(mv, "month", None)
+                    # MonthOfYear enum: JANUARY=2 … DECEMBER=13 → calendar 1–12
+                    month_num: Optional[int] = None
+                    try:
+                        enum_int = int(month_raw) if month_raw is not None else 0
+                        if 2 <= enum_int <= 13:
+                            month_num = enum_int - 1
+                    except (TypeError, ValueError):
+                        month_num = None
+                    volumes.append(
+                        {
+                            "year": int(getattr(mv, "year", 0) or 0),
+                            "month": month_num,
+                            "month_name": _proto_enum_name(month_raw),
+                            "monthly_searches": int(getattr(mv, "monthly_searches", 0) or 0),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+        out.append(
+            KeywordIdeaRow(
+                keyword_text=str(getattr(idea, "text", "") or ""),
+                avg_monthly_searches=avg,
+                competition=competition,
+                competition_index=competition_index,
+                low_top_of_page_bid=low_bid,
+                high_top_of_page_bid=high_bid,
+                monthly_search_volumes=tuple(volumes),
+            )
+        )
+        if limit and len(out) >= limit:
+            break
+
+    out.sort(
+        key=lambda x: (
+            -x.avg_monthly_searches,
+            (x.keyword_text or "").lower(),
+        )
+    )
+    return out
 

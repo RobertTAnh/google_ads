@@ -17,11 +17,14 @@ from cid_mcc_store import lookup_mcc_for_customer
 
 from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
+    DEFAULT_KEYWORD_PLAN_LANGUAGE_ID,
+    DEFAULT_KEYWORD_PLAN_LOCATION_IDS,
     GoogleAdsHelperError,
     McpDateFilter,
     CHANGE_EVENT_GAQL_LIMIT,
     resolve_mcp_auction_insight_date_filter,
     resolve_mcp_date_filter,
+    generate_keyword_ideas,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -33,6 +36,7 @@ from google_ads_helper import (
     get_customer_metrics_for_date_range,
     get_keyword_metrics_for_date_range,
     get_keyword_quality_scores_for_date_range,
+    get_pmax_search_term_insights_for_date_range,
     get_search_term_metrics_for_date_range,
     list_campaign_bidding_for_customers,
     list_campaigns_for_customers,
@@ -400,6 +404,56 @@ def register_mcp_routes(
         except GoogleAdsHelperError as e:
             return jsonify({"ok": False, "error": str(e)}), 502
 
+    @bp.get("/pmax_search_term_insights")
+    def pmax_search_term_insights():
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+        try:
+            df = _parse_date_filter_arg()
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = get_pmax_search_term_insights_for_date_range(
+                client,
+                [cid],
+                **_date_filter_call_kwargs(df),
+                campaign_id=campaign_id,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaign_id": campaign_id,
+                    **_date_filter_json(df),
+                    "channel": "PERFORMANCE_MAX",
+                    "note": (
+                        "Dữ liệu từ campaign_search_term_insight; nếu campaign-level không có term "
+                        "thì fallback customer_search_term_insight (Google thường chỉ trả insight id=0 ở campaign). "
+                        "cost/CPA không có từ resource này (Google không hỗ trợ cost_micros)."
+                    ),
+                    "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
     @bp.get("/campaign_budget_metrics")
     def campaign_budget_metrics():
         err = _mcp_auth_error_response()
@@ -700,5 +754,132 @@ def register_mcp_routes(
             )
         except GoogleAdsHelperError as e:
             return jsonify({"ok": False, "error": str(e)}), 502
+
+    def _parse_keyword_ideas_params() -> dict[str, Any]:
+        """Đọc params từ query (GET) hoặc JSON body (POST)."""
+        body: dict[str, Any] = {}
+        if request.method == "POST" and request.is_json:
+            body = request.get_json(silent=True) or {}
+
+        def _pick(name: str, default: Any = None) -> Any:
+            if name in body and body[name] is not None:
+                return body[name]
+            return request.args.get(name, default)
+
+        raw_kw = _pick("keywords", "")
+        keywords: list[str] = []
+        if isinstance(raw_kw, list):
+            keywords = [str(x).strip() for x in raw_kw if str(x).strip()]
+        elif isinstance(raw_kw, str) and raw_kw.strip():
+            keywords = [p.strip() for p in raw_kw.split(",") if p.strip()]
+
+        page_url = str(_pick("page_url", "") or "").strip()
+        language_id = str(_pick("language_id", DEFAULT_KEYWORD_PLAN_LANGUAGE_ID) or DEFAULT_KEYWORD_PLAN_LANGUAGE_ID).strip()
+
+        raw_locs = _pick("location_ids", "")
+        location_ids: list[str] = []
+        if isinstance(raw_locs, list):
+            location_ids = [str(x).strip() for x in raw_locs if str(x).strip()]
+        elif isinstance(raw_locs, str) and raw_locs.strip():
+            location_ids = [p.strip() for p in raw_locs.split(",") if p.strip()]
+        if not location_ids:
+            location_ids = list(DEFAULT_KEYWORD_PLAN_LOCATION_IDS)
+
+        network = str(_pick("keyword_plan_network", "GOOGLE_SEARCH_AND_PARTNERS") or "GOOGLE_SEARCH_AND_PARTNERS").strip()
+        adult_raw = _pick("include_adult_keywords", False)
+        if isinstance(adult_raw, bool):
+            include_adult = adult_raw
+        else:
+            include_adult = str(adult_raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        page_size_raw = _pick("page_size", "0")
+        try:
+            page_size = int(page_size_raw or 0)
+        except (TypeError, ValueError):
+            page_size = 0
+
+        return {
+            "keywords": keywords,
+            "page_url": page_url,
+            "language_id": language_id,
+            "location_ids": location_ids,
+            "keyword_plan_network": network,
+            "include_adult_keywords": include_adult,
+            "page_size": page_size,
+        }
+
+    def _generate_keyword_ideas_handler():
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        body = request.get_json(silent=True) if request.method == "POST" else None
+        body = body if isinstance(body, dict) else {}
+        cid = normalize_customer_id(
+            str(request.args.get("customer_id", "") or body.get("customer_id", "") or "")
+        )
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+
+        raw_mcc = str(request.args.get("mcc_id", "") or body.get("mcc_id", "") or "").strip()
+        if raw_mcc:
+            mcc_id, mcc_resolved_via = normalize_customer_id(raw_mcc), "query_param"
+        elif database_url:
+            mapped = lookup_mcc_for_customer(database_url, cid)
+            if mapped:
+                mcc_id, mcc_resolved_via = normalize_customer_id(mapped), "db_map"
+            else:
+                mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=False)
+                if not mcc_id:
+                    return jsonify({"ok": False, "error": _MCC_ERR}), 400
+        else:
+            mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=False)
+            if not mcc_id:
+                return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        try:
+            params = _parse_keyword_ideas_params()
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        if not params["keywords"] and not params["page_url"]:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần keywords (seed, cách nhau bởi dấu phẩy) hoặc page_url.",
+                }
+            ), 400
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = generate_keyword_ideas(client, cid, **params)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "seed_keywords": params["keywords"],
+                    "page_url": params["page_url"] or None,
+                    "language_id": params["language_id"],
+                    "location_ids": params["location_ids"],
+                    "keyword_plan_network": params["keyword_plan_network"],
+                    "include_adult_keywords": params["include_adult_keywords"],
+                    "note": (
+                        "Tương đương Keyword Planner «Khám phá các từ khóa mới» "
+                        "(KeywordPlanIdeaService.GenerateKeywordIdeas). "
+                        "Bid đơn vị tiền tài khoản. Mặc định language=1040 (VI), location=2704 (VN)."
+                    ),
+                    "count": len(rows),
+                    "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/generate_keyword_ideas")
+    def generate_keyword_ideas_get():
+        return _generate_keyword_ideas_handler()
+
+    @bp.post("/generate_keyword_ideas")
+    def generate_keyword_ideas_post():
+        return _generate_keyword_ideas_handler()
 
     app.register_blueprint(bp)

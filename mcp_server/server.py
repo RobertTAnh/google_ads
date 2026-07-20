@@ -31,7 +31,8 @@ mcp = FastMCP(
         "hoặc start_date + end_date (YYYY-MM-DD, ví dụ từ 2026-05-05). "
         "Nhiều MCC: truyền mcc_id. CPA trong JSON metrics = cost/conversions. "
         "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range). "
-        "Auction Insights (Search): ads_get_auction_insights."
+        "Auction Insights (Search): ads_get_auction_insights. "
+        "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights."
     ),
 )
 
@@ -190,11 +191,29 @@ def ads_search_term_performance(
     start_date: str = "",
     end_date: str = "",
 ) -> str:
-    """Cụm từ tìm kiếm thực tế (search_term_view) trong kỳ; mặc định 7 ngày."""
+    """Cụm từ tìm kiếm thực tế (search_term_view) trong kỳ — chỉ Search, không phải PMax."""
     return _get(
         "/mcp/v1/search_term_performance",
         _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
     )
+
+
+@mcp.tool()
+def ads_pmax_search_term_insights(
+    customer_id: str,
+    mcc_id: str = "",
+    campaign_id: str = "",
+    date_range: str = "LAST_7_DAYS",
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
+    """Search term insights PMax (campaign_search_term_insight); truyền campaign_id PMax khi có thể."""
+    params = _customer_params(
+        customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date
+    )
+    if campaign_id.strip():
+        params["campaign_id"] = campaign_id.strip()
+    return _get("/mcp/v1/pmax_search_term_insights", params)
 
 
 @mcp.tool()
@@ -231,6 +250,39 @@ def ads_get_ad_performance(
 def ads_get_negative_keywords(customer_id: str, mcc_id: str = "") -> str:
     """Từ khóa phủ định (campaign + ad group), cấu hình hiện tại; không phụ thuộc date_range."""
     return _get("/mcp/v1/negative_keywords", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+
+
+@mcp.tool()
+def ads_generate_keyword_ideas(
+    customer_id: str,
+    keywords: str,
+    mcc_id: str = "",
+    page_url: str = "",
+    language_id: str = "1040",
+    location_ids: str = "2704",
+    keyword_plan_network: str = "GOOGLE_SEARCH_AND_PARTNERS",
+    page_size: int = 0,
+) -> str:
+    """
+    Keyword Planner — khám phá từ khóa mới (GenerateKeywordIdeas) từ seed.
+    keywords: từ khóa gốc, cách nhau bởi dấu phẩy (vd: 'máy lạnh,điều hòa').
+    page_url: tùy chọn URL seed. language_id mặc định 1040 (VI), location_ids mặc định 2704 (VN).
+    page_size: giới hạn số ý tưởng (0 = lấy hết).
+    """
+    p: dict[str, Any] = {
+        "customer_id": customer_id,
+        "keywords": keywords,
+        "language_id": language_id or "1040",
+        "location_ids": location_ids or "2704",
+        "keyword_plan_network": keyword_plan_network or "GOOGLE_SEARCH_AND_PARTNERS",
+    }
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    if page_url.strip():
+        p["page_url"] = page_url.strip()
+    if page_size and int(page_size) > 0:
+        p["page_size"] = int(page_size)
+    return _get("/mcp/v1/generate_keyword_ideas", p)
 
 
 @mcp.tool()

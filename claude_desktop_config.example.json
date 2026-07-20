@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "google-ads-mcp": {
+      "command": "C:\\Users\\Admin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "args": ["D:\\1 Code App\\gg ads API\\run_mcp_stdio.py"],
+      "env": {
+        "GOOGLE_ADS_MCP_BASE_URL": "https://web-production-f8738.up.railway.app",
+        "MCP_API_KEY": "thay-bang-MCP_API_KEY-tren-Railway"
+      }
+    }
+  }
+}
