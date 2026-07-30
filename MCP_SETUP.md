@@ -47,6 +47,7 @@ Query thường dùng:
 | Campaign + ngân sách ngày + metrics kỳ + CPA | GET | `/mcp/v1/campaign_budget_metrics` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quảng cáo (ad) + metrics kỳ | GET | `/mcp/v1/ad_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Từ khóa phủ định (snapshot) | GET | `/mcp/v1/negative_keywords` | `customer_id`, `mcc_id?` (`date_range` không dùng) |
+| **Trạng thái keyword + CPC tối đa + first-page bid** (snapshot) | GET | `/mcp/v1/keyword_status` | `customer_id`, `mcc_id?`, `ad_group_id?`, `campaign_id?` (`date_range` không dùng) |
 | **Khám phá từ khóa mới** (Keyword Planner / GenerateKeywordIdeas) | GET hoặc POST | `/mcp/v1/generate_keyword_ideas` | `customer_id`, `keywords` (seed, CSV) hoặc `page_url`, `mcc_id?`, `language_id?` (mặc định `1040` VI), `location_ids?` (mặc định `2704` VN), `keyword_plan_network?`, `page_size?` |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |

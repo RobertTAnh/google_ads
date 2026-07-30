@@ -7,3 +7,9 @@ google-ads.yaml
 client_secret_*.json
 leafy-pilot-*.json
 
+# Windows MCP one-click build artifacts
+installer/windows/_build/
+installer/windows/release/
+installer/windows/GoogleAdsMCP-Windows-Setup.zip
+*.spec
+

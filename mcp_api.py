@@ -41,6 +41,7 @@ from google_ads_helper import (
     list_campaign_bidding_for_customers,
     list_campaigns_for_customers,
     list_child_accounts_under_mcc,
+    list_keyword_status_for_customer,
     list_negative_keywords_for_customer,
 )
 
@@ -507,6 +508,63 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "note": "Danh sách cấu hình hiện tại; query date_range (nếu có) không áp dụng cho negative keywords.",
+                    "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/keyword_status")
+    def keyword_status():
+        """Snapshot trạng thái keyword + CPC tối đa + ước tính first-page (không phụ thuộc date_range)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        raw_ag = (request.args.get("ad_group_id") or "").strip()
+        ad_group_id = None
+        if raw_ag:
+            digits = "".join(ch for ch in raw_ag if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "ad_group_id không hợp lệ."}), 400
+            ad_group_id = digits
+
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = list_keyword_status_for_customer(
+                client,
+                [cid],
+                ad_group_id=ad_group_id,
+                campaign_id=campaign_id,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "ad_group_id": ad_group_id,
+                    "campaign_id": campaign_id,
+                    "note": (
+                        "Snapshot cấu hình hiện tại (ad_group_criterion). "
+                        "primary_status / primary_status_reasons / first_page_cpc ≈ cột Trạng thái UI; "
+                        "cpc_bid ≈ CPC tối đa. date_range không áp dụng."
+                    ),
+                    "count": len(rows),
                     "rows": [asdict(r) for r in rows],
                 }
             )

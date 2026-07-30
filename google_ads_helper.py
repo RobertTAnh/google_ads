@@ -247,6 +247,32 @@ class NegativeKeywordRow:
 
 
 @dataclass(frozen=True)
+class KeywordStatusRow:
+    """
+    Snapshot trạng thái + giá thầu keyword (ad_group_criterion).
+    Tương đương cột Trạng thái / CPC tối đa / ước tính first-page trên UI Keywords.
+    """
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    criterion_id: str
+    keyword_text: str
+    match_type: str
+    status: str
+    primary_status: str
+    primary_status_reasons: Tuple[str, ...]
+    cpc_bid: Optional[float]
+    effective_cpc_bid: Optional[float]
+    first_page_cpc: Optional[float]
+    top_of_page_cpc: Optional[float]
+    first_position_cpc: Optional[float]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -1585,6 +1611,122 @@ def list_negative_keywords_for_customer(
     out.sort(
         key=lambda x: (
             x.level,
+            (x.campaign_name or "").lower(),
+            (x.ad_group_name or "").lower(),
+            (x.keyword_text or "").lower(),
+        )
+    )
+    return out
+
+
+def list_keyword_status_for_customer(
+    client: GoogleAdsClient,
+    customer_ids: Iterable[str],
+    *,
+    ad_group_id: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> List[KeywordStatusRow]:
+    """
+    Snapshot trạng thái keyword + CPC tối đa + ước tính first-page / top-of-page.
+    Không dùng segments.date — cấu hình & ước tính hiện hành (như cột Trạng thái trên UI).
+    """
+    ga_service = client.get_service("GoogleAdsService")
+    where_extra = ""
+    ag_filter = str(ad_group_id or "").strip().replace("-", "")
+    cap_filter = str(campaign_id or "").strip().replace("-", "")
+    if ag_filter.isdigit():
+        where_extra += f"\n          AND ad_group.id = {ag_filter}"
+    if cap_filter.isdigit():
+        where_extra += f"\n          AND campaign.id = {cap_filter}"
+
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_criterion.criterion_id,
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          ad_group_criterion.status,
+          ad_group_criterion.primary_status,
+          ad_group_criterion.primary_status_reasons,
+          ad_group_criterion.cpc_bid_micros,
+          ad_group_criterion.effective_cpc_bid_micros,
+          ad_group_criterion.position_estimates.first_page_cpc_micros,
+          ad_group_criterion.position_estimates.top_of_page_cpc_micros,
+          ad_group_criterion.position_estimates.first_position_cpc_micros
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.type = KEYWORD
+          AND ad_group_criterion.negative = FALSE
+          AND ad_group_criterion.status != REMOVED
+          AND campaign.status != REMOVED
+          AND ad_group.status != REMOVED{where_extra}
+    """.strip()
+
+    out: List[KeywordStatusRow] = []
+    for cid in customer_ids:
+        cid = str(cid).strip().replace("-", "")
+        if not cid:
+            continue
+        try:
+            stream = ga_service.search_stream(customer_id=cid, query=query)
+            for batch in stream:
+                for r in batch.results:
+                    crit = r.ad_group_criterion
+                    reasons_raw = getattr(crit, "primary_status_reasons", None) or []
+                    reasons: Tuple[str, ...] = tuple(
+                        name
+                        for x in reasons_raw
+                        for name in [_proto_enum_name(x)]
+                        if name and name not in ("UNSPECIFIED", "UNKNOWN")
+                    )
+                    primary = _proto_enum_name(getattr(crit, "primary_status", None))
+                    # Một số bản client map LIMITED → UNKNOWN; suy ra từ reason cho khớp UI.
+                    if primary in ("", "UNKNOWN", "UNSPECIFIED") and (
+                        "AD_GROUP_CRITERION_BELOW_FIRST_PAGE_BID" in reasons
+                    ):
+                        primary = "LIMITED"
+                    pe = getattr(crit, "position_estimates", None)
+                    out.append(
+                        KeywordStatusRow(
+                            customer_id=str(r.customer.id),
+                            customer_name=str(r.customer.descriptive_name or ""),
+                            campaign_id=str(r.campaign.id),
+                            campaign_name=str(r.campaign.name or ""),
+                            ad_group_id=str(r.ad_group.id),
+                            ad_group_name=str(r.ad_group.name or ""),
+                            criterion_id=str(crit.criterion_id),
+                            keyword_text=str(crit.keyword.text or ""),
+                            match_type=_proto_enum_name(getattr(crit.keyword, "match_type", None)),
+                            status=_proto_enum_name(getattr(crit, "status", None)),
+                            primary_status=primary,
+                            primary_status_reasons=reasons,
+                            cpc_bid=_micros_to_currency(getattr(crit, "cpc_bid_micros", None)),
+                            effective_cpc_bid=_micros_to_currency(getattr(crit, "effective_cpc_bid_micros", None)),
+                            first_page_cpc=_micros_to_currency(
+                                getattr(pe, "first_page_cpc_micros", None) if pe is not None else None
+                            ),
+                            top_of_page_cpc=_micros_to_currency(
+                                getattr(pe, "top_of_page_cpc_micros", None) if pe is not None else None
+                            ),
+                            first_position_cpc=_micros_to_currency(
+                                getattr(pe, "first_position_cpc_micros", None) if pe is not None else None
+                            ),
+                        )
+                    )
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error listing keyword status for {cid}:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+            raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    out.sort(
+        key=lambda x: (
+            (x.customer_name or "").lower(),
             (x.campaign_name or "").lower(),
             (x.ad_group_name or "").lower(),
             (x.keyword_text or "").lower(),

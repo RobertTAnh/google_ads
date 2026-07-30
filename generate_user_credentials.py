@@ -41,6 +41,10 @@ import socket
 import sys
 from urllib.parse import parse_qs, unquote
 
+# Google often returns extra scopes (openid, userinfo.email) beyond adwords.
+# Without this, oauthlib raises Warning and aborts fetch_token.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 # If using Web flow, the redirect URL must match exactly what’s configured in GCP for
 # the OAuth client.  If using Desktop flow, the redirect must be a localhost URL and
 # is not explicitly set in GCP.

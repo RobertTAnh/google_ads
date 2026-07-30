@@ -253,6 +253,26 @@ def ads_get_negative_keywords(customer_id: str, mcc_id: str = "") -> str:
 
 
 @mcp.tool()
+def ads_get_keyword_status(
+    customer_id: str,
+    mcc_id: str = "",
+    ad_group_id: str = "",
+    campaign_id: str = "",
+) -> str:
+    """
+    Snapshot trạng thái keyword + CPC tối đa + ước tính first-page / top-of-page.
+    Tương đương cột Trạng thái (Đủ điều kiện / Có giới hạn / Dưới giá thầu trang đầu) và CPC tối đa trên UI.
+    Không phụ thuộc date_range. Có thể lọc ad_group_id hoặc campaign_id.
+    """
+    p: dict[str, Any] = {"customer_id": customer_id, "mcc_id": mcc_id or None}
+    if ad_group_id.strip():
+        p["ad_group_id"] = ad_group_id.strip()
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    return _get("/mcp/v1/keyword_status", p)
+
+
+@mcp.tool()
 def ads_generate_keyword_ideas(
     customer_id: str,
     keywords: str,
