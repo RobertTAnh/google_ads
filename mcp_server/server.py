@@ -347,6 +347,8 @@ def ads_create_campaign(
     descriptions: str = "",
     keywords_json: str = "",
     default_cpc: float = 0,
+    max_cpc_ceiling: float = 0,
+    bidding_strategy: str = "",
     target_cpa: float = 0,
     geo_target_constant_ids: str = "2704",
     business_name: str = "",
@@ -357,7 +359,13 @@ def ads_create_campaign(
     Tạo campaign mới qua Google Ads API (mutate). Mặc định PAUSED.
 
     campaign_type: SEARCH | PERFORMANCE_MAX
-    daily_budget / default_cpc / target_cpa: theo đơn vị tiền tệ tài khoản (vd VND).
+    daily_budget / default_cpc / max_cpc_ceiling / target_cpa: theo đơn vị tiền tệ tài khoản (vd VND).
+
+    SEARCH bidding_strategy:
+    - MAXIMIZE_CLICKS + max_cpc_ceiling (vd 25000) = Tối đa hóa lượt nhấp có trần CPC
+    - MANUAL_CPC + default_cpc = CPC thủ công
+    - TARGET_CPA + target_cpa; mặc định MAXIMIZE_CONVERSIONS nếu không chỉ định
+    Chỉ truyền max_cpc_ceiling (không default_cpc) cũng được → tự chọn MAXIMIZE_CLICKS.
 
     SEARCH — bắt buộc: final_url, headlines (>=3, cách nhau dấu phẩy), descriptions (>=2),
     keywords_json: JSON array [{\"text\":\"từ khóa\",\"match_type\":\"PHRASE\"}] hoặc CSV text.
@@ -403,6 +411,10 @@ def ads_create_campaign(
             body["keywords"] = kw
         if default_cpc and float(default_cpc) > 0:
             body["default_cpc"] = float(default_cpc)
+        if max_cpc_ceiling and float(max_cpc_ceiling) > 0:
+            body["max_cpc_ceiling"] = float(max_cpc_ceiling)
+        if bidding_strategy.strip():
+            body["bidding_strategy"] = bidding_strategy.strip()
         if target_cpa and float(target_cpa) > 0:
             body["target_cpa"] = float(target_cpa)
         if geo_target_constant_ids.strip():

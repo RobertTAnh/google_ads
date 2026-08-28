@@ -1040,6 +1040,13 @@ def register_mcp_routes(
         if default_cpc_raw not in (None, "", 0, "0"):
             default_cpc = float(default_cpc_raw)
 
+        max_cpc_raw = body.get("max_cpc_ceiling", body.get("cpc_bid_ceiling"))
+        max_cpc_ceiling: float | None = None
+        if max_cpc_raw not in (None, "", 0, "0"):
+            max_cpc_ceiling = float(max_cpc_raw)
+
+        bidding_strategy = str(body.get("bidding_strategy", "") or "").strip() or None
+
         geo_ids: list[int] = []
         raw_geo = body.get("geo_target_constant_ids", body.get("location_ids"))
         if isinstance(raw_geo, list):
@@ -1064,6 +1071,8 @@ def register_mcp_routes(
             "daily_budget": daily_budget,
             "target_cpa": target_cpa,
             "default_cpc": default_cpc,
+            "max_cpc_ceiling": max_cpc_ceiling,
+            "bidding_strategy": bidding_strategy,
             "geo_target_constant_ids": geo_ids or None,
             "enable_campaign": enable_campaign,
             "final_url": str(body.get("final_url", "") or "").strip(),
@@ -1108,6 +1117,11 @@ def register_mcp_routes(
                 return jsonify({"ok": False, "error": "SEARCH cần ít nhất 2 descriptions."}), 400
             if not params["keywords"]:
                 return jsonify({"ok": False, "error": "SEARCH cần keywords (mảng {text, match_type})."}), 400
+            bs = (params.get("bidding_strategy") or "").upper()
+            if bs == "MANUAL_CPC" and not params.get("default_cpc"):
+                return jsonify({"ok": False, "error": "MANUAL_CPC cần default_cpc > 0."}), 400
+            if bs == "TARGET_CPA" and not params.get("target_cpa"):
+                return jsonify({"ok": False, "error": "TARGET_CPA cần target_cpa > 0."}), 400
         elif ctype in ("PERFORMANCE_MAX", "PMAX", "PERFORMANCEMAX"):
             if not params["final_url"]:
                 return jsonify({"ok": False, "error": "PERFORMANCE_MAX cần final_url."}), 400
@@ -1128,8 +1142,9 @@ def register_mcp_routes(
                     "customer_id": cid,
                     "note": (
                         "Campaign mới tạo ở trạng thái PAUSED (trừ khi enable_campaign=true với Search). "
-                        "SEARCH: ad group + keywords + RSA. PMax: text assets từ headlines/descriptions/long_headlines "
-                        "(vẫn cần ảnh/logo trên UI trước khi chạy đầy đủ). "
+                        "SEARCH: ad group + keywords + RSA. bidding_strategy: MANUAL_CPC | MAXIMIZE_CLICKS | "
+                        "MAXIMIZE_CONVERSIONS | TARGET_CPA; max_cpc_ceiling = trần CPC (MAXIMIZE_CLICKS), "
+                        "default_cpc chỉ cho MANUAL_CPC. PMax: text assets từ headlines/descriptions. "
                         "Số tiền theo đơn vị tiền tệ tài khoản Google Ads."
                     ),
                     "result": asdict(result),

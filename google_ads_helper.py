@@ -287,6 +287,8 @@ class CreateCampaignResult:
     asset_group_resource_name: str = ""
     ad_resource_name: str = ""
     keyword_count: int = 0
+    bidding_strategy: str = ""
+    max_cpc_ceiling: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -554,6 +556,10 @@ def _cpa_from_cost_and_conversions(cost: float, conversions: float) -> Optional[
     return round(float(cost) / float(conversions), 6)
 
 
+def _currency_to_micros(amount: float) -> int:
+    return int(round(float(amount) * 1_000_000))
+
+
 def _proto_enum_name(value: Any) -> str:
     if value is None:
         return ""
@@ -567,6 +573,84 @@ def _parse_keyword_match_type(client: GoogleAdsClient, raw: str) -> Any:
     if value is None:
         raise GoogleAdsHelperError(f"match_type không hợp lệ: {raw!r}. Dùng EXACT, PHRASE hoặc BROAD.")
     return value
+
+
+_SEARCH_BIDDING_STRATEGY_ALIASES: Dict[str, str] = {
+    "MAXIMIZE_CLICKS": "MAXIMIZE_CLICKS",
+    "MAX_CLICKS": "MAXIMIZE_CLICKS",
+    "CLICKS": "MAXIMIZE_CLICKS",
+    "MANUAL_CPC": "MANUAL_CPC",
+    "CPC": "MANUAL_CPC",
+    "MAXIMIZE_CONVERSIONS": "MAXIMIZE_CONVERSIONS",
+    "MAX_CONVERSIONS": "MAXIMIZE_CONVERSIONS",
+    "CONVERSIONS": "MAXIMIZE_CONVERSIONS",
+    "TARGET_CPA": "TARGET_CPA",
+    "TCPA": "TARGET_CPA",
+}
+
+
+def _normalize_search_bidding_strategy(raw: Optional[str]) -> str:
+    key = (raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if not key:
+        return ""
+    norm = _SEARCH_BIDDING_STRATEGY_ALIASES.get(key)
+    if not norm:
+        raise GoogleAdsHelperError(
+            f"bidding_strategy không hợp lệ: {raw!r}. "
+            "Dùng MANUAL_CPC, MAXIMIZE_CLICKS, MAXIMIZE_CONVERSIONS hoặc TARGET_CPA."
+        )
+    return norm
+
+
+def _resolve_search_bidding_strategy(
+    bidding_strategy: Optional[str],
+    *,
+    target_cpa: Optional[float],
+    default_cpc: Optional[float],
+    max_cpc_ceiling: Optional[float],
+) -> str:
+    """
+  Đặt chiến lược Search:
+  - explicit bidding_strategy nếu có
+  - else: target_cpa → TARGET_CPA; max_cpc_ceiling → MAXIMIZE_CLICKS;
+    default_cpc → MANUAL_CPC; mặc định MAXIMIZE_CONVERSIONS
+    """
+    explicit = _normalize_search_bidding_strategy(bidding_strategy)
+    if explicit:
+        return explicit
+    if target_cpa is not None and float(target_cpa) > 0:
+        return "TARGET_CPA"
+    if max_cpc_ceiling is not None and float(max_cpc_ceiling) > 0:
+        return "MAXIMIZE_CLICKS"
+    if default_cpc is not None and float(default_cpc) > 0:
+        return "MANUAL_CPC"
+    return "MAXIMIZE_CONVERSIONS"
+
+
+def _apply_search_campaign_bidding(
+    campaign: Any,
+    client: GoogleAdsClient,
+    strategy: str,
+    *,
+    target_cpa: Optional[float],
+    max_cpc_ceiling: Optional[float],
+) -> None:
+    if strategy == "MANUAL_CPC":
+        campaign.manual_cpc.enhanced_cpc_enabled = False
+        return
+    if strategy == "MAXIMIZE_CLICKS":
+        if max_cpc_ceiling is not None and float(max_cpc_ceiling) > 0:
+            campaign.maximize_clicks.cpc_bid_ceiling_micros = _currency_to_micros(float(max_cpc_ceiling))
+        else:
+            campaign.maximize_clicks.CopyFrom(client.get_type("MaximizeClicks"))
+        return
+    if strategy == "TARGET_CPA":
+        if target_cpa is None or float(target_cpa) <= 0:
+            raise GoogleAdsHelperError("TARGET_CPA cần target_cpa > 0.")
+        campaign.maximize_conversions.target_cpa_micros = _currency_to_micros(float(target_cpa))
+        return
+    # MAXIMIZE_CONVERSIONS
+    campaign.maximize_conversions.CopyFrom(client.get_type("MaximizeConversions"))
 
 
 def load_google_ads_client(
@@ -2972,10 +3056,6 @@ def list_campaign_bidding_for_customers(
     return rows
 
 
-def _currency_to_micros(amount: float) -> int:
-    return int(round(float(amount) * 1_000_000))
-
-
 def _resource_tail_id(resource_name: str) -> str:
     return str(resource_name or "").rsplit("/", 1)[-1]
 
@@ -2993,6 +3073,8 @@ def create_search_campaign(
     ad_group_name: Optional[str] = None,
     target_cpa: Optional[float] = None,
     default_cpc: Optional[float] = None,
+    max_cpc_ceiling: Optional[float] = None,
+    bidding_strategy: Optional[str] = None,
     geo_target_constant_ids: Optional[List[int]] = None,
     enable_campaign: bool = False,
 ) -> CreateCampaignResult:
@@ -3032,6 +3114,23 @@ def create_search_campaign(
     if not kw_specs:
         raise GoogleAdsHelperError("Cần ít nhất một keyword (mảng {text, match_type}).")
 
+    resolved_bidding = _resolve_search_bidding_strategy(
+        bidding_strategy,
+        target_cpa=target_cpa,
+        default_cpc=default_cpc,
+        max_cpc_ceiling=max_cpc_ceiling,
+    )
+    if resolved_bidding == "MANUAL_CPC" and (default_cpc is None or float(default_cpc) <= 0):
+        raise GoogleAdsHelperError("MANUAL_CPC cần default_cpc > 0.")
+    if resolved_bidding == "MAXIMIZE_CLICKS" and default_cpc and float(default_cpc) > 0:
+        # Tránh nhầm trần CPC với bid thủ công.
+        if max_cpc_ceiling is None or float(max_cpc_ceiling) <= 0:
+            max_cpc_ceiling = float(default_cpc)
+    use_manual_keyword_bids = resolved_bidding == "MANUAL_CPC"
+    applied_ceiling: Optional[float] = None
+    if resolved_bidding == "MAXIMIZE_CLICKS" and max_cpc_ceiling is not None and float(max_cpc_ceiling) > 0:
+        applied_ceiling = float(max_cpc_ceiling)
+
     ag_name = (ad_group_name or f"{name} - Ad Group 1").strip()
     status_enum = client.enums.CampaignStatusEnum
     campaign_status = status_enum.ENABLED if enable_campaign else status_enum.PAUSED
@@ -3066,12 +3165,13 @@ def create_search_campaign(
         if does_not_contain is not None:
             campaign.contains_eu_political_advertising = does_not_contain
 
-    if target_cpa is not None and float(target_cpa) > 0:
-        campaign.maximize_conversions.target_cpa_micros = _currency_to_micros(float(target_cpa))
-    elif default_cpc is not None and float(default_cpc) > 0:
-        campaign.manual_cpc.enhanced_cpc_enabled = False
-    else:
-        campaign.maximize_conversions.CopyFrom(client.get_type("MaximizeConversions"))
+    _apply_search_campaign_bidding(
+        campaign,
+        client,
+        resolved_bidding,
+        target_cpa=target_cpa,
+        max_cpc_ceiling=applied_ceiling,
+    )
 
     try:
         budget_response = campaign_budget_service.mutate_campaign_budgets(
@@ -3114,7 +3214,7 @@ def create_search_campaign(
         ag.campaign = campaign_resource_name
         ag.status = campaign_status
         ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
-        if default_cpc is not None and float(default_cpc) > 0:
+        if use_manual_keyword_bids and default_cpc is not None and float(default_cpc) > 0:
             ag.cpc_bid_micros = _currency_to_micros(float(default_cpc))
         ag_response = ad_group_service.mutate_ad_groups(customer_id=cid, operations=[ad_group_op])
         ad_group_resource_name = ag_response.results[0].resource_name
@@ -3132,7 +3232,7 @@ def create_search_campaign(
             crit.status = client.enums.AdGroupCriterionStatusEnum.ENABLED
             crit.keyword.text = spec["text"]
             crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
-            if default_cpc is not None and float(default_cpc) > 0:
+            if use_manual_keyword_bids and default_cpc is not None and float(default_cpc) > 0:
                 crit.cpc_bid_micros = _currency_to_micros(float(default_cpc))
             kw_ops.append(op)
         ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=kw_ops)
@@ -3176,6 +3276,8 @@ def create_search_campaign(
         ad_group_resource_name=ad_group_resource_name,
         ad_resource_name=ad_resource_name,
         keyword_count=len(kw_specs),
+        bidding_strategy=resolved_bidding,
+        max_cpc_ceiling=applied_ceiling,
     )
 
 
@@ -3414,6 +3516,8 @@ def create_campaign_for_customer(
     descriptions: Optional[Iterable[str]] = None,
     keywords: Optional[Iterable[Dict[str, str]]] = None,
     default_cpc: Optional[float] = None,
+    max_cpc_ceiling: Optional[float] = None,
+    bidding_strategy: Optional[str] = None,
     business_name: str = "Local Service Business",
 ) -> CreateCampaignResult:
     """Router tạo campaign theo loại: SEARCH hoặc PERFORMANCE_MAX."""
@@ -3431,6 +3535,8 @@ def create_campaign_for_customer(
             ad_group_name=ad_group_name,
             target_cpa=target_cpa,
             default_cpc=default_cpc,
+            max_cpc_ceiling=max_cpc_ceiling,
+            bidding_strategy=bidding_strategy,
             geo_target_constant_ids=geo_target_constant_ids,
             enable_campaign=enable_campaign,
         )
