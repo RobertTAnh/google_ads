@@ -2218,7 +2218,7 @@ def update_responsive_search_ad(
     descriptions: Optional[Iterable[str]] = None,
     status: Optional[str] = None,
 ) -> UpdateResponsiveSearchAdResult:
-    """Cập nhật RSA (headlines / descriptions / final_url / status) của ad_group_ad có sẵn."""
+    """Cập nhật RSA: headlines/descriptions/final_url qua AdService.mutate_ads; status qua AdGroupAdService."""
     cid = normalize_google_ads_customer_id(customer_id)
     ag_id = str(ad_group_id or "").strip().replace("-", "")
     aid = str(ad_id or "").strip().replace("-", "")
@@ -2260,43 +2260,60 @@ def update_responsive_search_ad(
         raise GoogleAdsHelperError(f"Ad {aid} không phải Responsive Search Ad (type={ad_type}).")
 
     ad_group_ad_service = client.get_service("AdGroupAdService")
-    resource_name = ad_group_ad_service.ad_group_ad_path(cid, ag_id, aid)
-    op = client.get_type("AdGroupAdOperation")
-    aga = op.update
-    aga.resource_name = resource_name
-    mask_paths: List[str] = []
+    ad_service = client.get_service("AdService")
+    ad_group_ad_resource_name = ad_group_ad_service.ad_group_ad_path(cid, ag_id, aid)
+    ad_resource_name = ad_service.ad_path(cid, aid)
+    updated_fields: List[str] = []
 
-    if url:
-        aga.ad.final_urls.append(url)
-        mask_paths.append("ad.final_urls")
-    if hlist:
-        assets = _build_rsa_text_assets(client, hlist[:15], max_len=30)
-        del aga.ad.responsive_search_ad.headlines[:]
-        aga.ad.responsive_search_ad.headlines.extend(assets)
-        mask_paths.append("ad.responsive_search_ad.headlines")
-    if dlist:
-        assets = _build_rsa_text_assets(client, dlist[:4], max_len=90)
-        del aga.ad.responsive_search_ad.descriptions[:]
-        aga.ad.responsive_search_ad.descriptions.extend(assets)
-        mask_paths.append("ad.responsive_search_ad.descriptions")
+    if url or hlist or dlist:
+        ad_op = client.get_type("AdOperation")
+        ad = ad_op.update
+        ad.resource_name = ad_resource_name
+        ad_mask_paths: List[str] = []
+
+        if url:
+            ad.final_urls.append(url)
+            ad_mask_paths.append("final_urls")
+        if hlist:
+            assets = _build_rsa_text_assets(client, hlist[:15], max_len=30)
+            del ad.responsive_search_ad.headlines[:]
+            ad.responsive_search_ad.headlines.extend(assets)
+            ad_mask_paths.append("responsive_search_ad.headlines")
+        if dlist:
+            assets = _build_rsa_text_assets(client, dlist[:4], max_len=90)
+            del ad.responsive_search_ad.descriptions[:]
+            ad.responsive_search_ad.descriptions.extend(assets)
+            ad_mask_paths.append("responsive_search_ad.descriptions")
+
+        ad_op.update_mask.CopyFrom(FieldMask(paths=ad_mask_paths))
+        try:
+            ad_service.mutate_ads(customer_id=cid, operations=[ad_op])
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error updating RSA content (AdService):\n{_format_googleads_exception(ex)}"
+            ) from ex
+        updated_fields.extend(ad_mask_paths)
+
     if status:
+        aga_op = client.get_type("AdGroupAdOperation")
+        aga = aga_op.update
+        aga.resource_name = ad_group_ad_resource_name
         aga.status = _parse_ad_group_ad_status(client, status)
-        mask_paths.append("status")
-
-    op.update_mask.CopyFrom(FieldMask(paths=mask_paths))
-    try:
-        ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[op])
-    except GoogleAdsException as ex:
-        raise GoogleAdsHelperError(
-            f"Google Ads API error updating RSA:\n{_format_googleads_exception(ex)}"
-        ) from ex
+        aga_op.update_mask.CopyFrom(FieldMask(paths=["status"]))
+        try:
+            ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[aga_op])
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Google Ads API error updating RSA status:\n{_format_googleads_exception(ex)}"
+            ) from ex
+        updated_fields.append("status")
 
     return UpdateResponsiveSearchAdResult(
         customer_id=cid,
         ad_group_id=ag_id,
         ad_id=aid,
-        ad_group_ad_resource_name=resource_name,
-        updated_fields=tuple(mask_paths),
+        ad_group_ad_resource_name=ad_group_ad_resource_name,
+        updated_fields=tuple(updated_fields),
     )
 
 

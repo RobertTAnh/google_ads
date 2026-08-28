@@ -1432,7 +1432,10 @@ def register_mcp_routes(
                     "mcc_customer_id": mcc_id,
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
-                    "note": "ad_id lấy từ ads_get_ad_performance.",
+                    "note": (
+                        "ad_id từ ads_get_ad_performance. "
+                        "headlines/descriptions/final_url dùng AdService; status dùng AdGroupAdService."
+                    ),
                     "result": asdict(result),
                 }
             )
