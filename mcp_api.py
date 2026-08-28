@@ -24,6 +24,7 @@ from google_ads_helper import (
     CHANGE_EVENT_GAQL_LIMIT,
     resolve_mcp_auction_insight_date_filter,
     resolve_mcp_date_filter,
+    create_campaign_for_customer,
     generate_keyword_ideas,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
@@ -939,5 +940,179 @@ def register_mcp_routes(
     @bp.post("/generate_keyword_ideas")
     def generate_keyword_ideas_post():
         return _generate_keyword_ideas_handler()
+
+    def _resolve_customer_mcc_from_request(body: dict[str, Any]) -> tuple[str, str, str] | tuple[None, None, Any]:
+        cid = normalize_customer_id(
+            str(request.args.get("customer_id", "") or body.get("customer_id", "") or "")
+        )
+        if not cid:
+            return None, None, (jsonify({"ok": False, "error": "Thiếu customer_id."}), 400)
+
+        raw_mcc = str(request.args.get("mcc_id", "") or body.get("mcc_id", "") or "").strip()
+        if raw_mcc:
+            mcc_id, mcc_resolved_via = normalize_customer_id(raw_mcc), "query_param"
+        elif database_url:
+            mapped = lookup_mcc_for_customer(database_url, cid)
+            if mapped:
+                mcc_id, mcc_resolved_via = normalize_customer_id(mapped), "db_map"
+            else:
+                mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=False)
+                if not mcc_id:
+                    return None, None, (jsonify({"ok": False, "error": _MCC_ERR}), 400)
+        else:
+            mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=False)
+            if not mcc_id:
+                return None, None, (jsonify({"ok": False, "error": _MCC_ERR}), 400)
+        return cid, mcc_id, mcc_resolved_via
+
+    def _parse_string_list(raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        if isinstance(raw, str) and raw.strip():
+            return [p.strip() for p in raw.split(",") if p.strip()]
+        return []
+
+    def _parse_keyword_specs(raw: Any) -> list[dict[str, str]]:
+        if isinstance(raw, list):
+            out: list[dict[str, str]] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    text = str(item.get("text", "") or "").strip()
+                    if text:
+                        out.append(
+                            {
+                                "text": text,
+                                "match_type": str(item.get("match_type", "PHRASE") or "PHRASE"),
+                            }
+                        )
+                elif str(item).strip():
+                    out.append({"text": str(item).strip(), "match_type": "PHRASE"})
+            return out
+        if isinstance(raw, str) and raw.strip():
+            return [{"text": p.strip(), "match_type": "PHRASE"} for p in raw.split(",") if p.strip()]
+        return []
+
+    def _parse_create_campaign_body(body: dict[str, Any]) -> dict[str, Any]:
+        campaign_type = str(body.get("campaign_type", "") or "").strip().upper()
+        campaign_name = str(body.get("campaign_name", "") or "").strip()
+        if not campaign_type:
+            raise ValueError("Thiếu campaign_type (SEARCH hoặc PERFORMANCE_MAX).")
+        if not campaign_name:
+            raise ValueError("Thiếu campaign_name.")
+
+        try:
+            daily_budget = float(body.get("daily_budget", 0) or 0)
+        except (TypeError, ValueError) as e:
+            raise ValueError("daily_budget không hợp lệ.") from e
+        if daily_budget <= 0:
+            raise ValueError("daily_budget phải > 0.")
+
+        target_cpa_raw = body.get("target_cpa")
+        target_cpa: float | None = None
+        if target_cpa_raw not in (None, "", 0, "0"):
+            target_cpa = float(target_cpa_raw)
+
+        default_cpc_raw = body.get("default_cpc")
+        default_cpc: float | None = None
+        if default_cpc_raw not in (None, "", 0, "0"):
+            default_cpc = float(default_cpc_raw)
+
+        geo_ids: list[int] = []
+        raw_geo = body.get("geo_target_constant_ids", body.get("location_ids"))
+        if isinstance(raw_geo, list):
+            for g in raw_geo:
+                if str(g).strip().isdigit():
+                    geo_ids.append(int(str(g).strip()))
+        elif isinstance(raw_geo, str) and raw_geo.strip():
+            for part in raw_geo.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    geo_ids.append(int(part))
+
+        enable_raw = body.get("enable_campaign", False)
+        if isinstance(enable_raw, bool):
+            enable_campaign = enable_raw
+        else:
+            enable_campaign = str(enable_raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        return {
+            "campaign_type": campaign_type,
+            "campaign_name": campaign_name,
+            "daily_budget": daily_budget,
+            "target_cpa": target_cpa,
+            "default_cpc": default_cpc,
+            "geo_target_constant_ids": geo_ids or None,
+            "enable_campaign": enable_campaign,
+            "final_url": str(body.get("final_url", "") or "").strip(),
+            "ad_group_name": str(body.get("ad_group_name", "") or "").strip() or None,
+            "headlines": _parse_string_list(body.get("headlines")),
+            "long_headlines": _parse_string_list(body.get("long_headlines")),
+            "descriptions": _parse_string_list(body.get("descriptions")),
+            "keywords": _parse_keyword_specs(body.get("keywords")),
+            "business_name": str(body.get("business_name", "") or "").strip() or "Local Service Business",
+        }
+
+    @bp.post("/create_campaign")
+    def create_campaign():
+        """
+        Tạo campaign mới (mutate). Hỗ trợ SEARCH (đủ ad group + keywords + RSA) và PERFORMANCE_MAX.
+        Mặc định PAUSED trừ khi enable_campaign=true.
+        """
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        try:
+            params = _parse_create_campaign_body(body)
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+        ctype = params["campaign_type"]
+        if ctype in ("SEARCH", "SEARCH_NETWORK"):
+            if not params["final_url"]:
+                return jsonify({"ok": False, "error": "SEARCH cần final_url."}), 400
+            if len(params["headlines"]) < 3:
+                return jsonify({"ok": False, "error": "SEARCH cần ít nhất 3 headlines."}), 400
+            if len(params["descriptions"]) < 2:
+                return jsonify({"ok": False, "error": "SEARCH cần ít nhất 2 descriptions."}), 400
+            if not params["keywords"]:
+                return jsonify({"ok": False, "error": "SEARCH cần keywords (mảng {text, match_type})."}), 400
+        elif ctype in ("PERFORMANCE_MAX", "PMAX", "PERFORMANCEMAX"):
+            if not params["final_url"]:
+                return jsonify({"ok": False, "error": "PERFORMANCE_MAX cần final_url."}), 400
+            if params["headlines"]:
+                if len(params["headlines"]) < 3:
+                    return jsonify({"ok": False, "error": "PMax cần ít nhất 3 headlines."}), 400
+                if len(params["descriptions"]) < 2:
+                    return jsonify({"ok": False, "error": "PMax cần ít nhất 2 descriptions khi truyền headlines."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = create_campaign_for_customer(client, cid, **params)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": (
+                        "Campaign mới tạo ở trạng thái PAUSED (trừ khi enable_campaign=true với Search). "
+                        "SEARCH: ad group + keywords + RSA. PMax: text assets từ headlines/descriptions/long_headlines "
+                        "(vẫn cần ảnh/logo trên UI trước khi chạy đầy đủ). "
+                        "Số tiền theo đơn vị tiền tệ tài khoản Google Ads."
+                    ),
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
 
     app.register_blueprint(bp)

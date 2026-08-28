@@ -32,7 +32,8 @@ mcp = FastMCP(
         "Nhiều MCC: truyền mcc_id. CPA trong JSON metrics = cost/conversions. "
         "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range). "
         "Auction Insights (Search): ads_get_auction_insights. "
-        "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights."
+        "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights. "
+        "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED)."
     ),
 )
 
@@ -65,6 +66,31 @@ def _get(path: str, params: Optional[dict[str, Any]] = None) -> str:
             url,
             params=params,
             headers={"X-MCP-API-Key": key},
+            timeout=_HTTP_TIMEOUT,
+        )
+        return r.text
+    except httpx.HTTPError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _post(path: str, body: dict[str, Any]) -> str:
+    base = _base_url()
+    key = _api_key()
+    if not base or not key:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "Thiếu GOOGLE_ADS_MCP_BASE_URL hoặc MCP_API_KEY trong env của MCP server (máy local).",
+            },
+            ensure_ascii=False,
+        )
+    payload = {k: v for k, v in body.items() if v is not None}
+    url = f"{base}{path}"
+    try:
+        r = httpx.post(
+            url,
+            json=payload,
+            headers={"X-MCP-API-Key": key, "Content-Type": "application/json"},
             timeout=_HTTP_TIMEOUT,
         )
         return r.text
@@ -303,6 +329,90 @@ def ads_generate_keyword_ideas(
     if page_size and int(page_size) > 0:
         p["page_size"] = int(page_size)
     return _get("/mcp/v1/generate_keyword_ideas", p)
+
+
+@mcp.tool()
+def ads_create_campaign(
+    customer_id: str,
+    campaign_type: str,
+    campaign_name: str,
+    daily_budget: float,
+    mcc_id: str = "",
+    final_url: str = "",
+    ad_group_name: str = "",
+    headlines: str = "",
+    long_headlines: str = "",
+    descriptions: str = "",
+    keywords_json: str = "",
+    default_cpc: float = 0,
+    target_cpa: float = 0,
+    geo_target_constant_ids: str = "2704",
+    business_name: str = "",
+    enable_campaign: bool = False,
+    payload_json: str = "",
+) -> str:
+    """
+    Tạo campaign mới qua Google Ads API (mutate). Mặc định PAUSED.
+
+    campaign_type: SEARCH | PERFORMANCE_MAX
+    daily_budget / default_cpc / target_cpa: theo đơn vị tiền tệ tài khoản (vd VND).
+
+    SEARCH — bắt buộc: final_url, headlines (>=3, cách nhau dấu phẩy), descriptions (>=2),
+    keywords_json: JSON array [{\"text\":\"từ khóa\",\"match_type\":\"PHRASE\"}] hoặc CSV text.
+
+    PERFORMANCE_MAX — cần final_url; headlines (>=3, cách nhau dấu phẩy), descriptions (>=2);
+    long_headlines tùy chọn (cách nhau dấu phẩy, tối đa 90 ký tự). business_name, geo mặc định VN.
+    Vẫn cần upload ảnh/logo trên Google Ads UI trước khi chạy đầy đủ.
+
+    Hoặc truyền payload_json (JSON đầy đủ) để ghi đè các field trên.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object JSON."}, ensure_ascii=False)
+    else:
+        body: dict[str, Any] = {
+            "customer_id": customer_id,
+            "campaign_type": campaign_type,
+            "campaign_name": campaign_name,
+            "daily_budget": daily_budget,
+            "enable_campaign": enable_campaign,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if final_url.strip():
+            body["final_url"] = final_url.strip()
+        if ad_group_name.strip():
+            body["ad_group_name"] = ad_group_name.strip()
+        if headlines.strip():
+            body["headlines"] = [p.strip() for p in headlines.split(",") if p.strip()]
+        if long_headlines.strip():
+            body["long_headlines"] = [p.strip() for p in long_headlines.split(",") if p.strip()]
+        if descriptions.strip():
+            body["descriptions"] = [p.strip() for p in descriptions.split(",") if p.strip()]
+        if keywords_json.strip():
+            try:
+                kw = json.loads(keywords_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+            body["keywords"] = kw
+        if default_cpc and float(default_cpc) > 0:
+            body["default_cpc"] = float(default_cpc)
+        if target_cpa and float(target_cpa) > 0:
+            body["target_cpa"] = float(target_cpa)
+        if geo_target_constant_ids.strip():
+            body["geo_target_constant_ids"] = [
+                p.strip() for p in geo_target_constant_ids.split(",") if p.strip()
+            ]
+        if business_name.strip():
+            body["business_name"] = business_name.strip()
+
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/create_campaign", body)
 
 
 @mcp.tool()

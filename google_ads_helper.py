@@ -273,6 +273,23 @@ class KeywordStatusRow:
 
 
 @dataclass(frozen=True)
+class CreateCampaignResult:
+    """Kết quả tạo campaign mới qua Google Ads API mutate."""
+
+    customer_id: str
+    campaign_type: str
+    campaign_id: str
+    campaign_resource_name: str
+    budget_resource_name: str
+    status: str
+    ad_group_id: str = ""
+    ad_group_resource_name: str = ""
+    asset_group_resource_name: str = ""
+    ad_resource_name: str = ""
+    keyword_count: int = 0
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -2722,6 +2739,222 @@ def list_campaign_bidding_for_customers(
     return rows
 
 
+def _currency_to_micros(amount: float) -> int:
+    return int(round(float(amount) * 1_000_000))
+
+
+def _resource_tail_id(resource_name: str) -> str:
+    return str(resource_name or "").rsplit("/", 1)[-1]
+
+
+def _parse_keyword_match_type(client: GoogleAdsClient, raw: str) -> Any:
+    name = (raw or "PHRASE").strip().upper()
+    enum = client.enums.KeywordMatchTypeEnum
+    value = getattr(enum, name, None)
+    if value is None:
+        raise GoogleAdsHelperError(f"match_type không hợp lệ: {raw!r}. Dùng EXACT, PHRASE hoặc BROAD.")
+    return value
+
+
+def create_search_campaign(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_name: str,
+    daily_budget: float,
+    final_url: str,
+    headlines: Iterable[str],
+    descriptions: Iterable[str],
+    keywords: Iterable[Dict[str, str]],
+    ad_group_name: Optional[str] = None,
+    target_cpa: Optional[float] = None,
+    default_cpc: Optional[float] = None,
+    geo_target_constant_ids: Optional[List[int]] = None,
+    enable_campaign: bool = False,
+) -> CreateCampaignResult:
+    """
+    Tạo Search campaign: budget + campaign + (tuỳ chọn) geo + ad group + keywords + RSA.
+    Mặc định PAUSED để agent kiểm tra trước khi bật.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("Customer ID is required.")
+    if daily_budget <= 0:
+        raise GoogleAdsHelperError("daily_budget phải > 0.")
+
+    name = (campaign_name or "").strip()
+    if not name:
+        raise GoogleAdsHelperError("campaign_name là bắt buộc.")
+
+    url = (final_url or "").strip()
+    if not url:
+        raise GoogleAdsHelperError("final_url là bắt buộc cho Search campaign.")
+
+    hlist = [str(x).strip() for x in headlines if str(x).strip()]
+    dlist = [str(x).strip() for x in descriptions if str(x).strip()]
+    if len(hlist) < 3:
+        raise GoogleAdsHelperError("Cần ít nhất 3 headlines cho Responsive Search Ad.")
+    if len(dlist) < 2:
+        raise GoogleAdsHelperError("Cần ít nhất 2 descriptions cho Responsive Search Ad.")
+
+    kw_specs: List[Dict[str, str]] = []
+    for item in keywords:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "") or "").strip()
+        if not text:
+            continue
+        kw_specs.append({"text": text, "match_type": str(item.get("match_type", "PHRASE") or "PHRASE")})
+    if not kw_specs:
+        raise GoogleAdsHelperError("Cần ít nhất một keyword (mảng {text, match_type}).")
+
+    ag_name = (ad_group_name or f"{name} - Ad Group 1").strip()
+    status_enum = client.enums.CampaignStatusEnum
+    campaign_status = status_enum.ENABLED if enable_campaign else status_enum.PAUSED
+
+    campaign_budget_service = client.get_service("CampaignBudgetService")
+    campaign_service = client.get_service("CampaignService")
+    campaign_criterion_service = client.get_service("CampaignCriterionService")
+    ad_group_service = client.get_service("AdGroupService")
+    ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+    ad_group_ad_service = client.get_service("AdGroupAdService")
+
+    budget_op = client.get_type("CampaignBudgetOperation")
+    budget_op.create.name = f"{name} Budget"
+    budget_op.create.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    budget_op.create.amount_micros = _currency_to_micros(daily_budget)
+    budget_op.create.explicitly_shared = False
+
+    campaign_op = client.get_type("CampaignOperation")
+    campaign = campaign_op.create
+    campaign.name = name
+    campaign.status = campaign_status
+    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum.SEARCH
+    campaign.campaign_budget = ""
+    campaign.network_settings.target_google_search = True
+    campaign.network_settings.target_search_network = True
+    campaign.network_settings.target_content_network = False
+    campaign.network_settings.target_partner_search_network = False
+
+    eu_status = getattr(client.enums, "EuPoliticalAdvertisingStatusEnum", None)
+    if eu_status is not None:
+        does_not_contain = getattr(eu_status, "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING", None)
+        if does_not_contain is not None:
+            campaign.contains_eu_political_advertising = does_not_contain
+
+    if target_cpa is not None and float(target_cpa) > 0:
+        campaign.maximize_conversions.target_cpa_micros = _currency_to_micros(float(target_cpa))
+    elif default_cpc is not None and float(default_cpc) > 0:
+        campaign.manual_cpc.enhanced_cpc_enabled = False
+    else:
+        campaign.maximize_conversions.CopyFrom(client.get_type("MaximizeConversions"))
+
+    try:
+        budget_response = campaign_budget_service.mutate_campaign_budgets(
+            customer_id=cid,
+            operations=[budget_op],
+        )
+        budget_resource_name = budget_response.results[0].resource_name
+        campaign.campaign_budget = budget_resource_name
+        campaign_response = campaign_service.mutate_campaigns(
+            customer_id=cid,
+            operations=[campaign_op],
+        )
+        campaign_resource_name = campaign_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Failed creating Search budget/campaign:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    if geo_target_constant_ids:
+        try:
+            geo_service = client.get_service("GeoTargetConstantService")
+            geo_ops = []
+            for geo_id in geo_target_constant_ids:
+                op = client.get_type("CampaignCriterionOperation")
+                crit = op.create
+                crit.campaign = campaign_resource_name
+                crit.location.geo_target_constant = geo_service.geo_target_constant_path(int(geo_id))
+                geo_ops.append(op)
+            if geo_ops:
+                campaign_criterion_service.mutate_campaign_criteria(customer_id=cid, operations=geo_ops)
+        except GoogleAdsException as ex:
+            raise GoogleAdsHelperError(
+                f"Campaign created, but location targeting failed:\n{_format_googleads_exception(ex)}"
+            ) from ex
+
+    try:
+        ad_group_op = client.get_type("AdGroupOperation")
+        ag = ad_group_op.create
+        ag.name = ag_name
+        ag.campaign = campaign_resource_name
+        ag.status = campaign_status
+        ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+        if default_cpc is not None and float(default_cpc) > 0:
+            ag.cpc_bid_micros = _currency_to_micros(float(default_cpc))
+        ag_response = ad_group_service.mutate_ad_groups(customer_id=cid, operations=[ad_group_op])
+        ad_group_resource_name = ag_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Campaign created, but ad group failed:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    try:
+        kw_ops = []
+        for spec in kw_specs:
+            op = client.get_type("AdGroupCriterionOperation")
+            crit = op.create
+            crit.ad_group = ad_group_resource_name
+            crit.status = client.enums.AdGroupCriterionStatusEnum.ENABLED
+            crit.keyword.text = spec["text"]
+            crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
+            if default_cpc is not None and float(default_cpc) > 0:
+                crit.cpc_bid_micros = _currency_to_micros(float(default_cpc))
+            kw_ops.append(op)
+        ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=kw_ops)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Campaign/ad group created, but keywords failed:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    ad_resource_name = ""
+    try:
+        ad_group_ad_op = client.get_type("AdGroupAdOperation")
+        aga = ad_group_ad_op.create
+        aga.ad_group = ad_group_resource_name
+        aga.status = campaign_status
+        ad = aga.ad
+        ad.final_urls.append(url)
+        rsa = ad.responsive_search_ad
+        for text in hlist[:15]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text[:30]
+            rsa.headlines.append(asset)
+        for text in dlist[:4]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text[:90]
+            rsa.descriptions.append(asset)
+        ad_response = ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[ad_group_ad_op])
+        ad_resource_name = ad_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Campaign/ad group/keywords created, but RSA failed:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return CreateCampaignResult(
+        customer_id=cid,
+        campaign_type="SEARCH",
+        campaign_id=_resource_tail_id(campaign_resource_name),
+        campaign_resource_name=campaign_resource_name,
+        budget_resource_name=budget_resource_name,
+        status="ENABLED" if enable_campaign else "PAUSED",
+        ad_group_id=_resource_tail_id(ad_group_resource_name),
+        ad_group_resource_name=ad_group_resource_name,
+        ad_resource_name=ad_resource_name,
+        keyword_count=len(kw_specs),
+    )
+
+
 def get_yesterday_keyword_performance(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
@@ -2758,19 +2991,16 @@ def create_performance_max_campaign_for_local_leads(
     geo_target_constant_ids: Optional[List[int]] = None,
     final_url: str = "https://example.com",
     business_name: str = "Local Service Business",
+    headlines: Optional[Iterable[str]] = None,
+    long_headlines: Optional[Iterable[str]] = None,
+    descriptions: Optional[Iterable[str]] = None,
 ) -> Dict[str, str]:
     """
     Creates a basic Performance Max campaign for local lead gen.
 
-    Mutate operations overview (high-level):
-    - Create a CampaignBudget
-    - Create a Campaign (PERFORMANCE_MAX)
-    - Create basic CampaignCriterion for location targeting (optional)
-    - Create an AssetGroup with placeholder assets (mock creative)
-
-    Important:
-    - Performance Max requires an AssetGroup to serve. We add a minimal placeholder AssetGroup
-      so the campaign exists, but you should replace assets with real creative before enabling.
+    Text assets: truyền headlines / long_headlines / descriptions để dùng copy thật.
+    Nếu bỏ trống, fallback placeholder demo (tương thích web UI cũ).
+    Ảnh/logo/video PMax vẫn cần bổ sung trên UI hoặc API riêng trước khi chạy.
     """
     customer_id = str(customer_id).strip().replace("-", "")
     if not customer_id:
@@ -2868,41 +3098,71 @@ def create_performance_max_campaign_for_local_leads(
         ag_response = asset_group_service.mutate_asset_groups(customer_id=customer_id, operations=[asset_group_op])
         asset_group_resource_name = ag_response.results[0].resource_name
 
-        # Create placeholder assets (text-only) to satisfy basic structure for demo.
-        # Note: In real PMax you should add images, logos, and a full set of headlines/descriptions.
-        created_asset_resource_names: List[str] = []
+        hlist = [str(x).strip() for x in (headlines or []) if str(x).strip()]
+        dlist = [str(x).strip() for x in (descriptions or []) if str(x).strip()]
+        llist = [str(x).strip() for x in (long_headlines or []) if str(x).strip()]
 
-        def _create_text_asset(asset_text: str, field: str) -> str:
+        if hlist:
+            if len(hlist) < 3:
+                raise GoogleAdsHelperError("PMax cần ít nhất 3 headlines khi truyền headlines.")
+            if len(dlist) < 2:
+                raise GoogleAdsHelperError("PMax cần ít nhất 2 descriptions khi truyền headlines.")
+        else:
+            hlist = [
+                f"{business_name} - Dịch vụ uy tín"[:30],
+                f"{business_name}"[:30],
+                "Liên hệ ngay hôm nay"[:30],
+            ]
+        if not dlist:
+            dlist = [
+                "Dịch vụ chuyên nghiệp, giá minh bạch. Liên hệ tư vấn miễn phí."[:90],
+                "Đội ngũ kinh nghiệm, hỗ trợ nhanh chóng. Đặt lịch ngay."[:90],
+            ]
+        if not llist:
+            seed = hlist[0] if hlist else business_name
+            llist = [seed[:90]]
+            if dlist:
+                llist.append(dlist[0][:90])
+
+        def _create_text_asset(asset_text: str) -> str:
             op = client.get_type("AssetOperation")
             asset = op.create
             asset.text_asset.text = asset_text
             resp = asset_service.mutate_assets(customer_id=customer_id, operations=[op])
             return resp.results[0].resource_name
 
-        headline_asset = _create_text_asset(f"{business_name} - Fast Repairs", "headline")
-        long_headline_asset = _create_text_asset("Book a same-day service visit. Call now.", "long_headline")
-        desc_asset = _create_text_asset("Trusted local technicians. Upfront pricing. Schedule today.", "description")
-        created_asset_resource_names.extend([headline_asset, long_headline_asset, desc_asset])
-
-        # Link assets to the AssetGroup.
         aga_ops = []
-        for rn, field_type in [
-            (headline_asset, client.enums.AssetFieldTypeEnum.HEADLINE),
-            (long_headline_asset, client.enums.AssetFieldTypeEnum.LONG_HEADLINE),
-            (desc_asset, client.enums.AssetFieldTypeEnum.DESCRIPTION),
-        ]:
+        field_enum = client.enums.AssetFieldTypeEnum
+        for text in hlist[:15]:
+            rn = _create_text_asset(text[:30])
             op = client.get_type("AssetGroupAssetOperation")
             aga = op.create
             aga.asset_group = asset_group_resource_name
             aga.asset = rn
-            aga.field_type = field_type
+            aga.field_type = field_enum.HEADLINE
+            aga_ops.append(op)
+        for text in llist[:5]:
+            rn = _create_text_asset(text[:90])
+            op = client.get_type("AssetGroupAssetOperation")
+            aga = op.create
+            aga.asset_group = asset_group_resource_name
+            aga.asset = rn
+            aga.field_type = field_enum.LONG_HEADLINE
+            aga_ops.append(op)
+        for text in dlist[:5]:
+            rn = _create_text_asset(text[:90])
+            op = client.get_type("AssetGroupAssetOperation")
+            aga = op.create
+            aga.asset_group = asset_group_resource_name
+            aga.asset = rn
+            aga.field_type = field_enum.DESCRIPTION
             aga_ops.append(op)
 
         asset_group_asset_service.mutate_asset_group_assets(customer_id=customer_id, operations=aga_ops)
     except GoogleAdsException as ex:
         raise GoogleAdsHelperError(
-            "Campaign created, but placeholder AssetGroup/assets failed. "
-            "PMax needs valid assets before it can serve.\n"
+            "Campaign created, but AssetGroup/text assets failed. "
+            "PMax vẫn cần ảnh/logo trước khi chạy đầy đủ.\n"
             f"{_format_googleads_exception(ex)}"
         ) from ex
 
@@ -2911,6 +3171,72 @@ def create_performance_max_campaign_for_local_leads(
         "campaign_resource_name": campaign_resource_name,
         "asset_group_resource_name": asset_group_resource_name,
     }
+
+
+def create_campaign_for_customer(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_type: str,
+    campaign_name: str,
+    daily_budget: float,
+    target_cpa: Optional[float] = None,
+    geo_target_constant_ids: Optional[List[int]] = None,
+    enable_campaign: bool = False,
+    final_url: str = "",
+    ad_group_name: Optional[str] = None,
+    headlines: Optional[Iterable[str]] = None,
+    long_headlines: Optional[Iterable[str]] = None,
+    descriptions: Optional[Iterable[str]] = None,
+    keywords: Optional[Iterable[Dict[str, str]]] = None,
+    default_cpc: Optional[float] = None,
+    business_name: str = "Local Service Business",
+) -> CreateCampaignResult:
+    """Router tạo campaign theo loại: SEARCH hoặc PERFORMANCE_MAX."""
+    ctype = (campaign_type or "").strip().upper().replace("-", "_")
+    if ctype in ("SEARCH", "SEARCH_NETWORK"):
+        return create_search_campaign(
+            client,
+            customer_id,
+            campaign_name=campaign_name,
+            daily_budget=daily_budget,
+            final_url=final_url,
+            headlines=headlines or [],
+            descriptions=descriptions or [],
+            keywords=keywords or [],
+            ad_group_name=ad_group_name,
+            target_cpa=target_cpa,
+            default_cpc=default_cpc,
+            geo_target_constant_ids=geo_target_constant_ids,
+            enable_campaign=enable_campaign,
+        )
+    if ctype in ("PERFORMANCE_MAX", "PMAX", "PERFORMANCEMAX"):
+        raw = create_performance_max_campaign_for_local_leads(
+            client,
+            customer_id,
+            campaign_name=campaign_name,
+            daily_budget=daily_budget,
+            target_cpa=target_cpa,
+            geo_target_constant_ids=geo_target_constant_ids,
+            final_url=final_url or "https://example.com",
+            business_name=business_name,
+            headlines=headlines,
+            long_headlines=long_headlines,
+            descriptions=descriptions,
+        )
+        cid = normalize_google_ads_customer_id(customer_id)
+        return CreateCampaignResult(
+            customer_id=cid,
+            campaign_type="PERFORMANCE_MAX",
+            campaign_id=_resource_tail_id(raw["campaign_resource_name"]),
+            campaign_resource_name=raw["campaign_resource_name"],
+            budget_resource_name=raw["budget_resource_name"],
+            status="PAUSED",
+            asset_group_resource_name=raw.get("asset_group_resource_name", ""),
+        )
+    raise GoogleAdsHelperError(
+        f"campaign_type không hỗ trợ: {campaign_type!r}. Dùng SEARCH hoặc PERFORMANCE_MAX."
+    )
 
 
 def optimize_budgets_by_cpa(
