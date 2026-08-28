@@ -317,6 +317,20 @@ class AddCampaignExtensionsResult:
 
 
 @dataclass(frozen=True)
+class AddAdGroupResult:
+    """Kết quả thêm ad group Search (+ keywords + RSA) vào campaign có sẵn."""
+
+    customer_id: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_resource_name: str
+    ad_resource_name: str
+    keyword_count: int
+    status: str
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -558,6 +572,10 @@ def _cpa_from_cost_and_conversions(cost: float, conversions: float) -> Optional[
 
 def _currency_to_micros(amount: float) -> int:
     return int(round(float(amount) * 1_000_000))
+
+
+def _resource_tail_id(resource_name: str) -> str:
+    return str(resource_name or "").rsplit("/", 1)[-1]
 
 
 def _proto_enum_name(value: Any) -> str:
@@ -1953,6 +1971,183 @@ def add_campaign_extensions(
     )
 
 
+def _campaign_is_manual_cpc(client: GoogleAdsClient, customer_id: str, campaign_id: str) -> bool:
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT campaign.id, campaign.bidding_strategy_type
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+          AND campaign.status != REMOVED
+        LIMIT 1
+    """.strip()
+    try:
+        rows = list(ga_service.search(customer_id=customer_id, query=query))
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Không đọc được campaign {campaign_id}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    if not rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy campaign {campaign_id}.")
+    bst = _proto_enum_name(getattr(rows[0].campaign, "bidding_strategy_type", None))
+    return bst in ("MANUAL_CPC", "ENHANCED_CPC")
+
+
+def add_search_ad_group_to_campaign(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_id: str,
+    *,
+    ad_group_name: str,
+    final_url: str,
+    headlines: Iterable[str],
+    descriptions: Iterable[str],
+    keywords: Iterable[Dict[str, str]],
+    default_cpc: Optional[float] = None,
+    enable_ad_group: bool = True,
+) -> AddAdGroupResult:
+    """
+    Thêm ad group Search (+ keywords + RSA) vào campaign Search đã có.
+    default_cpc chỉ áp dụng khi campaign đang dùng MANUAL_CPC; campaign auto-bid thì bỏ qua.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if not cid or not cap_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+
+    name = (ad_group_name or "").strip()
+    if not name:
+        raise GoogleAdsHelperError("ad_group_name là bắt buộc.")
+
+    url = (final_url or "").strip()
+    if not url:
+        raise GoogleAdsHelperError("final_url là bắt buộc.")
+
+    hlist = [str(x).strip() for x in headlines if str(x).strip()]
+    dlist = [str(x).strip() for x in descriptions if str(x).strip()]
+    if len(hlist) < 3:
+        raise GoogleAdsHelperError("Cần ít nhất 3 headlines cho Responsive Search Ad.")
+    if len(dlist) < 2:
+        raise GoogleAdsHelperError("Cần ít nhất 2 descriptions cho Responsive Search Ad.")
+
+    kw_specs: List[Dict[str, str]] = []
+    for item in keywords:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "") or "").strip()
+        if text:
+            kw_specs.append({"text": text, "match_type": str(item.get("match_type", "PHRASE") or "PHRASE")})
+    if not kw_specs:
+        raise GoogleAdsHelperError("Cần ít nhất một keyword (mảng {text, match_type}).")
+
+    ga_service = client.get_service("GoogleAdsService")
+    meta_query = f"""
+        SELECT campaign.id, campaign.name, campaign.advertising_channel_type
+        FROM campaign
+        WHERE campaign.id = {cap_id}
+          AND campaign.status != REMOVED
+        LIMIT 1
+    """.strip()
+    try:
+        meta_rows = list(ga_service.search(customer_id=cid, query=meta_query))
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Không đọc được campaign {cap_id}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    if not meta_rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy campaign {cap_id}.")
+    cap = meta_rows[0].campaign
+    channel = _proto_enum_name(getattr(cap, "advertising_channel_type", None))
+    if channel != "SEARCH":
+        raise GoogleAdsHelperError(
+            f"Campaign {cap_id} không phải Search (advertising_channel_type={channel or 'UNKNOWN'})."
+        )
+    campaign_name = str(cap.name or "")
+
+    campaign_service = client.get_service("CampaignService")
+    ad_group_service = client.get_service("AdGroupService")
+    ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+    ad_group_ad_service = client.get_service("AdGroupAdService")
+    campaign_resource = campaign_service.campaign_path(cid, cap_id)
+
+    use_manual_bids = _campaign_is_manual_cpc(client, cid, cap_id)
+    if default_cpc is not None and float(default_cpc) > 0 and not use_manual_bids:
+        raise GoogleAdsHelperError(
+            "Campaign không dùng MANUAL_CPC — bỏ default_cpc (campaign auto-bid sẽ tự giá thầu)."
+        )
+
+    status_enum = client.enums.AdGroupStatusEnum
+    ag_status = status_enum.ENABLED if enable_ad_group else status_enum.PAUSED
+
+    try:
+        ad_group_op = client.get_type("AdGroupOperation")
+        ag = ad_group_op.create
+        ag.name = name
+        ag.campaign = campaign_resource
+        ag.status = ag_status
+        ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+        if use_manual_bids and default_cpc is not None and float(default_cpc) > 0:
+            ag.cpc_bid_micros = _currency_to_micros(float(default_cpc))
+        ag_response = ad_group_service.mutate_ad_groups(customer_id=cid, operations=[ad_group_op])
+        ad_group_resource_name = ag_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Failed creating ad group:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    try:
+        kw_ops = []
+        for spec in kw_specs:
+            op = client.get_type("AdGroupCriterionOperation")
+            crit = op.create
+            crit.ad_group = ad_group_resource_name
+            crit.status = client.enums.AdGroupCriterionStatusEnum.ENABLED
+            crit.keyword.text = spec["text"]
+            crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
+            if use_manual_bids and default_cpc is not None and float(default_cpc) > 0:
+                crit.cpc_bid_micros = _currency_to_micros(float(default_cpc))
+            kw_ops.append(op)
+        ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=kw_ops)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Ad group created, but keywords failed:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    ad_resource_name = ""
+    try:
+        ad_group_ad_op = client.get_type("AdGroupAdOperation")
+        aga = ad_group_ad_op.create
+        aga.ad_group = ad_group_resource_name
+        aga.status = ag_status
+        ad = aga.ad
+        ad.final_urls.append(url)
+        rsa = ad.responsive_search_ad
+        for text in hlist[:15]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text[:30]
+            rsa.headlines.append(asset)
+        for text in dlist[:4]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = text[:90]
+            rsa.descriptions.append(asset)
+        ad_response = ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[ad_group_ad_op])
+        ad_resource_name = ad_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Ad group/keywords created, but RSA failed:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return AddAdGroupResult(
+        customer_id=cid,
+        campaign_id=cap_id,
+        campaign_name=campaign_name,
+        ad_group_id=_resource_tail_id(ad_group_resource_name),
+        ad_group_resource_name=ad_group_resource_name,
+        ad_resource_name=ad_resource_name,
+        keyword_count=len(kw_specs),
+        status="ENABLED" if enable_ad_group else "PAUSED",
+    )
+
+
 def list_keyword_status_for_customer(
     client: GoogleAdsClient,
     customer_ids: Iterable[str],
@@ -3054,10 +3249,6 @@ def list_campaign_bidding_for_customers(
         )
     )
     return rows
-
-
-def _resource_tail_id(resource_name: str) -> str:
-    return str(resource_name or "").rsplit("/", 1)[-1]
 
 
 def create_search_campaign(

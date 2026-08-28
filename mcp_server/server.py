@@ -35,7 +35,8 @@ mcp = FastMCP(
         "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights. "
         "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED). "
         "Thêm negative keywords: ads_add_negative_keywords. "
-        "Thêm extensions (sitelink/callout/call): ads_add_campaign_extensions."
+        "Thêm extensions (sitelink/callout/call): ads_add_campaign_extensions. "
+        "Thêm ad group Search vào campaign có sẵn: ads_add_ad_group."
     ),
 )
 
@@ -507,6 +508,59 @@ def ads_add_campaign_extensions(
     if "campaign_id" not in body:
         body["campaign_id"] = campaign_id
     return _post("/mcp/v1/add_campaign_extensions", body)
+
+
+@mcp.tool()
+def ads_add_ad_group(
+    customer_id: str,
+    campaign_id: str,
+    ad_group_name: str,
+    final_url: str,
+    headlines: str,
+    descriptions: str,
+    keywords_json: str,
+    mcc_id: str = "",
+    default_cpc: float = 0,
+    enable_ad_group: bool = True,
+    payload_json: str = "",
+) -> str:
+    """
+    Thêm ad group Search (+ keywords + RSA) vào campaign Search đã có.
+
+    headlines / descriptions: cách nhau dấu phẩy (>=3 / >=2).
+    keywords_json: [{\"text\":\"...\",\"match_type\":\"PHRASE\"}, ...]
+    default_cpc: chỉ khi campaign MANUAL_CPC; campaign MAXIMIZE_CLICKS thì bỏ qua.
+    enable_ad_group: true = ENABLED, false = PAUSED.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        try:
+            keywords = json.loads(keywords_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        body = {
+            "customer_id": customer_id,
+            "campaign_id": campaign_id,
+            "ad_group_name": ad_group_name,
+            "final_url": final_url,
+            "headlines": [p.strip() for p in headlines.split(",") if p.strip()],
+            "descriptions": [p.strip() for p in descriptions.split(",") if p.strip()],
+            "keywords": keywords,
+            "enable_ad_group": enable_ad_group,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if default_cpc and float(default_cpc) > 0:
+            body["default_cpc"] = float(default_cpc)
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/add_ad_group", body)
 
 
 @mcp.tool()

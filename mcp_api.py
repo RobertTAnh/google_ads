@@ -28,6 +28,7 @@ from google_ads_helper import (
     generate_keyword_ideas,
     add_campaign_extensions,
     add_negative_keywords,
+    add_search_ad_group_to_campaign,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -1266,6 +1267,83 @@ def register_mcp_routes(
                     "customer_id": cid,
                     "campaign_id": campaign_id,
                     "note": "Đã tạo Asset và gắn vào campaign qua CampaignAsset.",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/add_ad_group")
+    def add_ad_group_route():
+        """Thêm ad group Search (+ keywords + RSA) vào campaign Search có sẵn."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
+        ad_group_name = str(body.get("ad_group_name", "") or "").strip()
+        final_url = str(body.get("final_url", "") or "").strip()
+        headlines = _parse_string_list(body.get("headlines"))
+        descriptions = _parse_string_list(body.get("descriptions"))
+        keywords = _parse_keyword_specs(body.get("keywords"))
+
+        default_cpc: float | None = None
+        raw_cpc = body.get("default_cpc")
+        if raw_cpc not in (None, "", 0, "0"):
+            default_cpc = float(raw_cpc)
+
+        enable_raw = body.get("enable_ad_group", True)
+        if isinstance(enable_raw, bool):
+            enable_ad_group = enable_raw
+        else:
+            enable_ad_group = str(enable_raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        if not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+        if not ad_group_name:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_name."}), 400
+        if not final_url:
+            return jsonify({"ok": False, "error": "Thiếu final_url."}), 400
+        if len(headlines) < 3:
+            return jsonify({"ok": False, "error": "Cần ít nhất 3 headlines."}), 400
+        if len(descriptions) < 2:
+            return jsonify({"ok": False, "error": "Cần ít nhất 2 descriptions."}), 400
+        if not keywords:
+            return jsonify({"ok": False, "error": "Cần keywords (mảng {text, match_type})."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = add_search_ad_group_to_campaign(
+                client,
+                cid,
+                campaign_id,
+                ad_group_name=ad_group_name,
+                final_url=final_url,
+                headlines=headlines,
+                descriptions=descriptions,
+                keywords=keywords,
+                default_cpc=default_cpc,
+                enable_ad_group=enable_ad_group,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaign_id": campaign_id,
+                    "note": (
+                        "Chỉ campaign Search. default_cpc chỉ dùng khi campaign MANUAL_CPC; "
+                        "MAXIMIZE_CLICKS/CONVERSIONS thì bỏ default_cpc."
+                    ),
                     "result": asdict(result),
                 }
             )
