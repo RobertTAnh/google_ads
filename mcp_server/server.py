@@ -430,6 +430,18 @@ def ads_create_campaign(
 
     if "customer_id" not in body:
         body["customer_id"] = customer_id
+
+    if not body.get("keywords") and body.get("keywords_json"):
+        raw_kw_json = body.get("keywords_json")
+        if isinstance(raw_kw_json, str) and raw_kw_json.strip():
+            try:
+                body["keywords"] = json.loads(raw_kw_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        elif isinstance(raw_kw_json, list):
+            body["keywords"] = raw_kw_json
+    body.pop("keywords_json", None)
+
     return _post("/mcp/v1/create_campaign", body)
 
 

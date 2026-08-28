@@ -8,6 +8,7 @@ Query kỳ: `date_range` (GAQL DURING) hoặc `start_date` + `end_date` (YYYY-MM
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import asdict
 from typing import Any, Callable, Optional
 
@@ -1094,6 +1095,17 @@ def register_mcp_routes(
         else:
             enable_campaign = str(enable_raw or "").strip().lower() in ("1", "true", "yes", "on")
 
+        keywords_raw = body.get("keywords")
+        if not keywords_raw and body.get("keywords_json"):
+            raw_kw_json = body.get("keywords_json")
+            if isinstance(raw_kw_json, str) and raw_kw_json.strip():
+                try:
+                    keywords_raw = json.loads(raw_kw_json)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"keywords_json không hợp lệ: {e}") from e
+            elif isinstance(raw_kw_json, list):
+                keywords_raw = raw_kw_json
+
         return {
             "campaign_type": campaign_type,
             "campaign_name": campaign_name,
@@ -1109,7 +1121,7 @@ def register_mcp_routes(
             "headlines": _parse_string_list(body.get("headlines")),
             "long_headlines": _parse_string_list(body.get("long_headlines")),
             "descriptions": _parse_string_list(body.get("descriptions")),
-            "keywords": _parse_keyword_specs(body.get("keywords")),
+            "keywords": _parse_keyword_specs(keywords_raw),
             "business_name": str(body.get("business_name", "") or "").strip() or "Local Service Business",
         }
 
@@ -1181,6 +1193,8 @@ def register_mcp_routes(
             )
         except GoogleAdsHelperError as e:
             return jsonify({"ok": False, "error": str(e)}), 502
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Lỗi server create_campaign: {e}"}), 500
 
     @bp.post("/add_negative_keywords")
     def add_negative_keywords_route():

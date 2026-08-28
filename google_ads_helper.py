@@ -682,10 +682,9 @@ def _apply_search_campaign_bidding(
         campaign.manual_cpc.enhanced_cpc_enabled = False
         return
     if strategy == "MAXIMIZE_CLICKS":
+        # Google Ads API v23+: MAXIMIZE_CLICKS = TargetSpend (không còn field maximize_clicks).
         if max_cpc_ceiling is not None and float(max_cpc_ceiling) > 0:
-            campaign.maximize_clicks.cpc_bid_ceiling_micros = _currency_to_micros(float(max_cpc_ceiling))
-        else:
-            campaign.maximize_clicks.CopyFrom(client.get_type("MaximizeClicks"))
+            campaign.target_spend.cpc_bid_ceiling_micros = _currency_to_micros(float(max_cpc_ceiling))
         return
     if strategy == "TARGET_CPA":
         if target_cpa is None or float(target_cpa) <= 0:
@@ -3683,6 +3682,9 @@ def create_search_campaign(
     ag_name = (ad_group_name or f"{name} - Ad Group 1").strip()
     status_enum = client.enums.CampaignStatusEnum
     campaign_status = status_enum.ENABLED if enable_campaign else status_enum.PAUSED
+    ad_group_status_enum = client.enums.AdGroupStatusEnum
+    ad_group_ad_status_enum = client.enums.AdGroupAdStatusEnum
+    ag_status = ad_group_status_enum.ENABLED if enable_campaign else ad_group_status_enum.PAUSED
 
     campaign_budget_service = client.get_service("CampaignBudgetService")
     campaign_service = client.get_service("CampaignService")
@@ -3761,7 +3763,7 @@ def create_search_campaign(
         ag = ad_group_op.create
         ag.name = ag_name
         ag.campaign = campaign_resource_name
-        ag.status = campaign_status
+        ag.status = ag_status
         ag.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
         if use_manual_keyword_bids and default_cpc is not None and float(default_cpc) > 0:
             ag.cpc_bid_micros = _currency_to_micros(float(default_cpc))
@@ -3795,7 +3797,7 @@ def create_search_campaign(
         ad_group_ad_op = client.get_type("AdGroupAdOperation")
         aga = ad_group_ad_op.create
         aga.ad_group = ad_group_resource_name
-        aga.status = campaign_status
+        aga.status = ag_status
         ad = aga.ad
         ad.final_urls.append(url)
         rsa = ad.responsive_search_ad
