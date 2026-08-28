@@ -33,7 +33,9 @@ mcp = FastMCP(
         "Target CPA đã set trên campaign: ads_campaign_bidding (không cần date_range). "
         "Auction Insights (Search): ads_get_auction_insights. "
         "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights. "
-        "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED)."
+        "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED). "
+        "Thêm negative keywords: ads_add_negative_keywords. "
+        "Thêm extensions (sitelink/callout/call): ads_add_campaign_extensions."
     ),
 )
 
@@ -413,6 +415,86 @@ def ads_create_campaign(
     if "customer_id" not in body:
         body["customer_id"] = customer_id
     return _post("/mcp/v1/create_campaign", body)
+
+
+@mcp.tool()
+def ads_add_negative_keywords(
+    customer_id: str,
+    campaign_id: str,
+    keywords_json: str,
+    level: str = "campaign",
+    ad_group_id: str = "",
+    mcc_id: str = "",
+) -> str:
+    """
+    Thêm từ khóa phủ định lên campaign hoặc ad group có sẵn.
+    level: campaign | ad_group. keywords_json: [{\"text\":\"...\",\"match_type\":\"PHRASE\"}, ...]
+    """
+    try:
+        keywords = json.loads(keywords_json)
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+    body: dict[str, Any] = {
+        "customer_id": customer_id,
+        "campaign_id": campaign_id,
+        "level": level,
+        "keywords": keywords,
+    }
+    if mcc_id.strip():
+        body["mcc_id"] = mcc_id.strip()
+    if ad_group_id.strip():
+        body["ad_group_id"] = ad_group_id.strip()
+    return _post("/mcp/v1/add_negative_keywords", body)
+
+
+@mcp.tool()
+def ads_add_campaign_extensions(
+    customer_id: str,
+    campaign_id: str,
+    mcc_id: str = "",
+    sitelinks_json: str = "",
+    callouts: str = "",
+    phone_number: str = "",
+    phone_country_code: str = "VN",
+    payload_json: str = "",
+) -> str:
+    """
+    Gắn extension lên campaign có sẵn: Sitelink, Callout, Call (số điện thoại).
+
+    sitelinks_json: [{\"link_text\":\"...\",\"final_url\":\"https://...\",\"description1\":\"?\",\"description2\":\"?\"}]
+    callouts: chú thích, cách nhau dấu phẩy.
+    phone_number + phone_country_code (mặc định VN) cho Call extension.
+    Hoặc payload_json (JSON đầy đủ).
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body = {
+            "customer_id": customer_id,
+            "campaign_id": campaign_id,
+            "phone_country_code": phone_country_code or "VN",
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if sitelinks_json.strip():
+            try:
+                body["sitelinks"] = json.loads(sitelinks_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"sitelinks_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if callouts.strip():
+            body["callouts"] = [p.strip() for p in callouts.split(",") if p.strip()]
+        if phone_number.strip():
+            body["phone_number"] = phone_number.strip()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    if "campaign_id" not in body:
+        body["campaign_id"] = campaign_id
+    return _post("/mcp/v1/add_campaign_extensions", body)
 
 
 @mcp.tool()

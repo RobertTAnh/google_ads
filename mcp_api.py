@@ -26,6 +26,8 @@ from google_ads_helper import (
     resolve_mcp_date_filter,
     create_campaign_for_customer,
     generate_keyword_ideas,
+    add_campaign_extensions,
+    add_negative_keywords,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -992,6 +994,27 @@ def register_mcp_routes(
             return [{"text": p.strip(), "match_type": "PHRASE"} for p in raw.split(",") if p.strip()]
         return []
 
+    def _parse_sitelink_specs(raw: Any) -> list[dict[str, str]]:
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            link_text = str(item.get("link_text", "") or item.get("text", "") or "").strip()
+            final_url = str(item.get("final_url", "") or item.get("url", "") or "").strip()
+            if not link_text or not final_url:
+                continue
+            out.append(
+                {
+                    "link_text": link_text,
+                    "final_url": final_url,
+                    "description1": str(item.get("description1", "") or "").strip(),
+                    "description2": str(item.get("description2", "") or "").strip(),
+                }
+            )
+        return out
+
     def _parse_create_campaign_body(body: dict[str, Any]) -> dict[str, Any]:
         campaign_type = str(body.get("campaign_type", "") or "").strip().upper()
         campaign_name = str(body.get("campaign_name", "") or "").strip()
@@ -1109,6 +1132,125 @@ def register_mcp_routes(
                         "(vẫn cần ảnh/logo trên UI trước khi chạy đầy đủ). "
                         "Số tiền theo đơn vị tiền tệ tài khoản Google Ads."
                     ),
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/add_negative_keywords")
+    def add_negative_keywords_route():
+        """Thêm từ khóa phủ định lên campaign hoặc ad group có sẵn."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        level = str(body.get("level", "") or "").strip().lower()
+        campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+        keywords = _parse_keyword_specs(body.get("keywords"))
+
+        if level not in ("campaign", "ad_group"):
+            return jsonify({"ok": False, "error": "level phải là campaign hoặc ad_group."}), 400
+        if not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+        if level == "ad_group" and not ad_group_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id khi level=ad_group."}), 400
+        if not keywords:
+            return jsonify({"ok": False, "error": "Cần keywords (mảng {text, match_type})."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = add_negative_keywords(
+                client,
+                cid,
+                level=level,
+                campaign_id=campaign_id,
+                ad_group_id=ad_group_id or None,
+                keywords=keywords,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/add_campaign_extensions")
+    def add_campaign_extensions_route():
+        """Gắn Sitelink, Callout, Call extension lên campaign có sẵn."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
+        if not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+
+        sitelinks = _parse_sitelink_specs(body.get("sitelinks"))
+        callouts = _parse_string_list(body.get("callouts"))
+
+        phone_number = ""
+        phone_country_code = "VN"
+        call_raw = body.get("call") or body.get("phone")
+        if isinstance(call_raw, dict):
+            phone_number = str(call_raw.get("phone_number", "") or call_raw.get("number", "") or "").strip()
+            phone_country_code = str(call_raw.get("country_code", "VN") or "VN").strip()
+        elif isinstance(call_raw, str):
+            phone_number = call_raw.strip()
+        if not phone_number:
+            phone_number = str(body.get("phone_number", "") or "").strip()
+        if body.get("phone_country_code"):
+            phone_country_code = str(body.get("phone_country_code") or "VN").strip()
+
+        if not sitelinks and not callouts and not phone_number:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần ít nhất một trong: sitelinks, callouts, call/phone_number.",
+                }
+            ), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = add_campaign_extensions(
+                client,
+                cid,
+                campaign_id,
+                sitelinks=sitelinks,
+                callouts=callouts,
+                phone_number=phone_number,
+                phone_country_code=phone_country_code,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaign_id": campaign_id,
+                    "note": "Đã tạo Asset và gắn vào campaign qua CampaignAsset.",
                     "result": asdict(result),
                 }
             )

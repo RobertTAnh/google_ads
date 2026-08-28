@@ -290,6 +290,31 @@ class CreateCampaignResult:
 
 
 @dataclass(frozen=True)
+class AddNegativeKeywordsResult:
+    """Kết quả thêm từ khóa phủ định (campaign hoặc ad group)."""
+
+    customer_id: str
+    level: str
+    campaign_id: str
+    ad_group_id: str
+    added_count: int
+    resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AddCampaignExtensionsResult:
+    """Kết quả gắn extension (asset) lên campaign có sẵn."""
+
+    customer_id: str
+    campaign_id: str
+    sitelink_count: int
+    callout_count: int
+    call_added: bool
+    asset_resource_names: Tuple[str, ...]
+    campaign_asset_resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -533,6 +558,15 @@ def _proto_enum_name(value: Any) -> str:
     if value is None:
         return ""
     return str(getattr(value, "name", value) or "")
+
+
+def _parse_keyword_match_type(client: GoogleAdsClient, raw: str) -> Any:
+    name = (raw or "PHRASE").strip().upper()
+    enum = client.enums.KeywordMatchTypeEnum
+    value = getattr(enum, name, None)
+    if value is None:
+        raise GoogleAdsHelperError(f"match_type không hợp lệ: {raw!r}. Dùng EXACT, PHRASE hoặc BROAD.")
+    return value
 
 
 def load_google_ads_client(
@@ -1634,6 +1668,205 @@ def list_negative_keywords_for_customer(
         )
     )
     return out
+
+
+def add_negative_keywords(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    level: str,
+    campaign_id: str,
+    keywords: Iterable[Dict[str, str]],
+    ad_group_id: Optional[str] = None,
+) -> AddNegativeKeywordsResult:
+    """Thêm từ khóa phủ định cấp campaign hoặc ad group."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if not cid or not cap_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+
+    lvl = (level or "").strip().lower()
+    if lvl not in ("campaign", "ad_group"):
+        raise GoogleAdsHelperError("level phải là 'campaign' hoặc 'ad_group'.")
+
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if lvl == "ad_group" and not ag_id.isdigit():
+        raise GoogleAdsHelperError("ad_group_id bắt buộc khi level=ad_group.")
+
+    kw_specs: List[Dict[str, str]] = []
+    for item in keywords:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "") or "").strip()
+        if text:
+            kw_specs.append({"text": text, "match_type": str(item.get("match_type", "PHRASE") or "PHRASE")})
+    if not kw_specs:
+        raise GoogleAdsHelperError("Cần ít nhất một keyword (mảng {text, match_type}).")
+
+    campaign_service = client.get_service("CampaignService")
+    ad_group_service = client.get_service("AdGroupService")
+    campaign_resource = campaign_service.campaign_path(cid, cap_id)
+
+    resource_names: List[str] = []
+    try:
+        if lvl == "campaign":
+            campaign_criterion_service = client.get_service("CampaignCriterionService")
+            ops = []
+            for spec in kw_specs:
+                op = client.get_type("CampaignCriterionOperation")
+                crit = op.create
+                crit.campaign = campaign_resource
+                crit.negative = True
+                crit.keyword.text = spec["text"]
+                crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
+                ops.append(op)
+            resp = campaign_criterion_service.mutate_campaign_criteria(customer_id=cid, operations=ops)
+            resource_names = [r.resource_name for r in resp.results]
+        else:
+            ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+            ad_group_resource = ad_group_service.ad_group_path(cid, ag_id)
+            ops = []
+            for spec in kw_specs:
+                op = client.get_type("AdGroupCriterionOperation")
+                crit = op.create
+                crit.ad_group = ad_group_resource
+                crit.negative = True
+                crit.keyword.text = spec["text"]
+                crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
+                ops.append(op)
+            resp = ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=ops)
+            resource_names = [r.resource_name for r in resp.results]
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error adding negative keywords:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    return AddNegativeKeywordsResult(
+        customer_id=cid,
+        level=lvl,
+        campaign_id=cap_id,
+        ad_group_id=ag_id if lvl == "ad_group" else "",
+        added_count=len(resource_names),
+        resource_names=tuple(resource_names),
+    )
+
+
+def add_campaign_extensions(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_id: str,
+    *,
+    sitelinks: Optional[Iterable[Dict[str, str]]] = None,
+    callouts: Optional[Iterable[str]] = None,
+    phone_number: str = "",
+    phone_country_code: str = "VN",
+) -> AddCampaignExtensionsResult:
+    """
+    Gắn extension text lên campaign có sẵn: Sitelink, Callout, Call (số điện thoại).
+    Tạo Asset rồi liên kết qua CampaignAssetService.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if not cid or not cap_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+
+    sitelink_specs: List[Dict[str, str]] = []
+    for item in sitelinks or []:
+        if not isinstance(item, dict):
+            continue
+        link_text = str(item.get("link_text", "") or item.get("text", "") or "").strip()
+        final_url = str(item.get("final_url", "") or item.get("url", "") or "").strip()
+        if link_text and final_url:
+            sitelink_specs.append(
+                {
+                    "link_text": link_text,
+                    "final_url": final_url,
+                    "description1": str(item.get("description1", "") or "").strip(),
+                    "description2": str(item.get("description2", "") or "").strip(),
+                }
+            )
+
+    callout_texts = [str(x).strip() for x in (callouts or []) if str(x).strip()]
+    phone = str(phone_number or "").strip()
+    country = str(phone_country_code or "VN").strip().upper() or "VN"
+
+    if not sitelink_specs and not callout_texts and not phone:
+        raise GoogleAdsHelperError(
+            "Cần ít nhất một trong: sitelinks, callouts, phone_number (call extension)."
+        )
+
+    campaign_service = client.get_service("CampaignService")
+    asset_service = client.get_service("AssetService")
+    campaign_asset_service = client.get_service("CampaignAssetService")
+    campaign_resource = campaign_service.campaign_path(cid, cap_id)
+    field_enum = client.enums.AssetFieldTypeEnum
+
+    asset_resource_names: List[str] = []
+    campaign_asset_resource_names: List[str] = []
+
+    def _link_asset(asset_rn: str, field_type: Any) -> None:
+        op = client.get_type("CampaignAssetOperation")
+        ca = op.create
+        ca.campaign = campaign_resource
+        ca.asset = asset_rn
+        ca.field_type = field_type
+        resp = campaign_asset_service.mutate_campaign_assets(customer_id=cid, operations=[op])
+        campaign_asset_resource_names.append(resp.results[0].resource_name)
+
+    try:
+        for spec in sitelink_specs:
+            op = client.get_type("AssetOperation")
+            asset = op.create
+            asset.final_urls.append(spec["final_url"])
+            sl = asset.sitelink_asset
+            sl.link_text = spec["link_text"][:25]
+            if spec["description1"]:
+                sl.description1 = spec["description1"][:35]
+            if spec["description2"]:
+                sl.description2 = spec["description2"][:35]
+            resp = asset_service.mutate_assets(customer_id=cid, operations=[op])
+            asset_rn = resp.results[0].resource_name
+            asset_resource_names.append(asset_rn)
+            _link_asset(asset_rn, field_enum.SITELINK)
+
+        for text in callout_texts[:20]:
+            op = client.get_type("AssetOperation")
+            asset = op.create
+            asset.callout_asset.text = text[:25]
+            resp = asset_service.mutate_assets(customer_id=cid, operations=[op])
+            asset_rn = resp.results[0].resource_name
+            asset_resource_names.append(asset_rn)
+            _link_asset(asset_rn, field_enum.CALLOUT)
+
+        call_added = False
+        if phone:
+            op = client.get_type("AssetOperation")
+            asset = op.create
+            asset.call_asset.phone_number = phone
+            asset.call_asset.country_code = country
+            resp = asset_service.mutate_assets(customer_id=cid, operations=[op])
+            asset_rn = resp.results[0].resource_name
+            asset_resource_names.append(asset_rn)
+            _link_asset(asset_rn, field_enum.CALL)
+            call_added = True
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error adding campaign extensions:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    return AddCampaignExtensionsResult(
+        customer_id=cid,
+        campaign_id=cap_id,
+        sitelink_count=len(sitelink_specs),
+        callout_count=len(callout_texts[:20]),
+        call_added=call_added,
+        asset_resource_names=tuple(asset_resource_names),
+        campaign_asset_resource_names=tuple(campaign_asset_resource_names),
+    )
 
 
 def list_keyword_status_for_customer(
@@ -2745,15 +2978,6 @@ def _currency_to_micros(amount: float) -> int:
 
 def _resource_tail_id(resource_name: str) -> str:
     return str(resource_name or "").rsplit("/", 1)[-1]
-
-
-def _parse_keyword_match_type(client: GoogleAdsClient, raw: str) -> Any:
-    name = (raw or "PHRASE").strip().upper()
-    enum = client.enums.KeywordMatchTypeEnum
-    value = getattr(enum, name, None)
-    if value is None:
-        raise GoogleAdsHelperError(f"match_type không hợp lệ: {raw!r}. Dùng EXACT, PHRASE hoặc BROAD.")
-    return value
 
 
 def create_search_campaign(
