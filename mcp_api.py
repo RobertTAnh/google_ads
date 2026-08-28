@@ -29,6 +29,9 @@ from google_ads_helper import (
     add_campaign_extensions,
     add_negative_keywords,
     add_search_ad_group_to_campaign,
+    update_responsive_search_ad,
+    update_ad_group,
+    update_keyword_bids,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -995,6 +998,31 @@ def register_mcp_routes(
             return [{"text": p.strip(), "match_type": "PHRASE"} for p in raw.split(",") if p.strip()]
         return []
 
+    def _parse_keyword_update_specs(raw: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            spec: dict[str, Any] = {}
+            crit = str(item.get("criterion_id", "") or "").strip().replace("-", "")
+            if crit:
+                spec["criterion_id"] = crit
+            text = str(item.get("text", "") or item.get("keyword_text", "") or "").strip()
+            if text:
+                spec["text"] = text
+                spec["match_type"] = str(item.get("match_type", "PHRASE") or "PHRASE")
+            cpc_raw = item.get("cpc_bid", item.get("default_cpc"))
+            if cpc_raw not in (None, "", 0, "0"):
+                spec["cpc_bid"] = float(cpc_raw)
+            st = item.get("status")
+            if st:
+                spec["status"] = str(st).strip().upper()
+            if spec:
+                out.append(spec)
+        return out
+
     def _parse_sitelink_specs(raw: Any) -> list[dict[str, str]]:
         if not isinstance(raw, list):
             return []
@@ -1344,6 +1372,168 @@ def register_mcp_routes(
                         "Chỉ campaign Search. default_cpc chỉ dùng khi campaign MANUAL_CPC; "
                         "MAXIMIZE_CLICKS/CONVERSIONS thì bỏ default_cpc."
                     ),
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/update_responsive_search_ad")
+    def update_responsive_search_ad_route():
+        """Cập nhật RSA: headlines, descriptions, final_url, status."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+        ad_id = "".join(ch for ch in str(body.get("ad_id", "") or "") if ch.isdigit())
+        final_url = str(body.get("final_url", "") or "").strip()
+        headlines = _parse_string_list(body.get("headlines"))
+        descriptions = _parse_string_list(body.get("descriptions"))
+        status = str(body.get("status", "") or "").strip().upper() or None
+
+        if not ad_group_id or not ad_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id hoặc ad_id."}), 400
+        if not final_url and not headlines and not descriptions and not status:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần ít nhất một field: final_url, headlines, descriptions hoặc status.",
+                }
+            ), 400
+        if headlines and len(headlines) < 3:
+            return jsonify({"ok": False, "error": "headlines cần ít nhất 3 dòng khi cập nhật."}), 400
+        if descriptions and len(descriptions) < 2:
+            return jsonify({"ok": False, "error": "descriptions cần ít nhất 2 dòng khi cập nhật."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = update_responsive_search_ad(
+                client,
+                cid,
+                ad_group_id,
+                ad_id,
+                final_url=final_url or None,
+                headlines=headlines or None,
+                descriptions=descriptions or None,
+                status=status,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "ad_id lấy từ ads_get_ad_performance.",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/update_ad_group")
+    def update_ad_group_route():
+        """Cập nhật ad group Search: tên, status, default_cpc (MANUAL_CPC)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+        ad_group_name = str(body.get("ad_group_name", "") or "").strip() or None
+        status = str(body.get("status", "") or "").strip().upper() or None
+
+        default_cpc: float | None = None
+        raw_cpc = body.get("default_cpc")
+        if raw_cpc not in (None, "", 0, "0"):
+            default_cpc = float(raw_cpc)
+
+        if not ad_group_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id."}), 400
+        if not ad_group_name and not status and default_cpc is None:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần ít nhất một field: ad_group_name, status hoặc default_cpc.",
+                }
+            ), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = update_ad_group(
+                client,
+                cid,
+                ad_group_id,
+                ad_group_name=ad_group_name,
+                status=status,
+                default_cpc=default_cpc,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "default_cpc chỉ áp dụng khi campaign MANUAL_CPC.",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/update_keyword_bids")
+    def update_keyword_bids_route():
+        """Cập nhật bid/status keyword trong ad group."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+        keywords = _parse_keyword_update_specs(body.get("keywords"))
+
+        if not ad_group_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id."}), 400
+        if not keywords:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần keywords: [{criterion_id?, text?, match_type?, cpc_bid?, status?}].",
+                }
+            ), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = update_keyword_bids(client, cid, ad_group_id, keywords)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "criterion_id từ ads_get_keyword_status; cpc_bid chỉ khi campaign MANUAL_CPC.",
                     "result": asdict(result),
                 }
             )

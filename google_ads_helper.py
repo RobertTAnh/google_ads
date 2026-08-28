@@ -331,6 +331,31 @@ class AddAdGroupResult:
 
 
 @dataclass(frozen=True)
+class UpdateResponsiveSearchAdResult:
+    customer_id: str
+    ad_group_id: str
+    ad_id: str
+    ad_group_ad_resource_name: str
+    updated_fields: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class UpdateAdGroupResult:
+    customer_id: str
+    ad_group_id: str
+    ad_group_resource_name: str
+    updated_fields: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class UpdateKeywordBidsResult:
+    customer_id: str
+    ad_group_id: str
+    updated_count: int
+    resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -2145,6 +2170,322 @@ def add_search_ad_group_to_campaign(
         ad_resource_name=ad_resource_name,
         keyword_count=len(kw_specs),
         status="ENABLED" if enable_ad_group else "PAUSED",
+    )
+
+
+def _build_rsa_text_assets(client: GoogleAdsClient, texts: Iterable[str], *, max_len: int) -> List[Any]:
+    out: List[Any] = []
+    for text in texts:
+        s = str(text).strip()
+        if not s:
+            continue
+        asset = client.get_type("AdTextAsset")
+        asset.text = s[:max_len]
+        out.append(asset)
+    return out
+
+
+def _parse_criterion_status(client: GoogleAdsClient, raw: Optional[str]) -> Any:
+    name = (raw or "").strip().upper()
+    if not name:
+        raise GoogleAdsHelperError("status keyword không hợp lệ.")
+    enum = client.enums.AdGroupCriterionStatusEnum
+    value = getattr(enum, name, None)
+    if value is None:
+        raise GoogleAdsHelperError(f"status không hợp lệ: {raw!r}. Dùng ENABLED hoặc PAUSED.")
+    return value
+
+
+def _parse_ad_group_status(client: GoogleAdsClient, raw: Optional[str]) -> Any:
+    name = (raw or "").strip().upper()
+    if not name:
+        raise GoogleAdsHelperError("status ad group không hợp lệ.")
+    enum = client.enums.AdGroupStatusEnum
+    value = getattr(enum, name, None)
+    if value is None:
+        raise GoogleAdsHelperError(f"status không hợp lệ: {raw!r}. Dùng ENABLED hoặc PAUSED.")
+    return value
+
+
+def update_responsive_search_ad(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    ad_id: str,
+    *,
+    final_url: Optional[str] = None,
+    headlines: Optional[Iterable[str]] = None,
+    descriptions: Optional[Iterable[str]] = None,
+    status: Optional[str] = None,
+) -> UpdateResponsiveSearchAdResult:
+    """Cập nhật RSA (headlines / descriptions / final_url / status) của ad_group_ad có sẵn."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    aid = str(ad_id or "").strip().replace("-", "")
+    if not cid or not ag_id.isdigit() or not aid.isdigit():
+        raise GoogleAdsHelperError("customer_id, ad_group_id và ad_id hợp lệ là bắt buộc.")
+
+    hlist = [str(x).strip() for x in (headlines or []) if str(x).strip()]
+    dlist = [str(x).strip() for x in (descriptions or []) if str(x).strip()]
+    url = (final_url or "").strip()
+
+    if not url and not hlist and not dlist and not status:
+        raise GoogleAdsHelperError(
+            "Cần ít nhất một field cập nhật: final_url, headlines, descriptions hoặc status."
+        )
+    if hlist and len(hlist) < 3:
+        raise GoogleAdsHelperError("headlines cần ít nhất 3 dòng khi cập nhật.")
+    if dlist and len(dlist) < 2:
+        raise GoogleAdsHelperError("descriptions cần ít nhất 2 dòng khi cập nhật.")
+
+    ga_service = client.get_service("GoogleAdsService")
+    verify_q = f"""
+        SELECT ad_group_ad.ad.type, ad_group_ad.status
+        FROM ad_group_ad
+        WHERE ad_group.id = {ag_id}
+          AND ad_group_ad.ad.id = {aid}
+          AND ad_group_ad.status != REMOVED
+        LIMIT 1
+    """.strip()
+    try:
+        rows = list(ga_service.search(customer_id=cid, query=verify_q))
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Không đọc được ad_group_ad {ag_id}/{aid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    if not rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy ad {aid} trong ad group {ag_id}.")
+    ad_type = _proto_enum_name(getattr(rows[0].ad_group_ad.ad, "type_", None))
+    if ad_type and ad_type not in ("RESPONSIVE_SEARCH_AD", "RESPONSIVE_SEARCH_AD_LEGACY"):
+        raise GoogleAdsHelperError(f"Ad {aid} không phải Responsive Search Ad (type={ad_type}).")
+
+    ad_group_ad_service = client.get_service("AdGroupAdService")
+    resource_name = ad_group_ad_service.ad_group_ad_path(cid, ag_id, aid)
+    op = client.get_type("AdGroupAdOperation")
+    aga = op.update
+    aga.resource_name = resource_name
+    mask_paths: List[str] = []
+
+    if url:
+        aga.ad.final_urls.append(url)
+        mask_paths.append("ad.final_urls")
+    if hlist:
+        assets = _build_rsa_text_assets(client, hlist[:15], max_len=30)
+        del aga.ad.responsive_search_ad.headlines[:]
+        aga.ad.responsive_search_ad.headlines.extend(assets)
+        mask_paths.append("ad.responsive_search_ad.headlines")
+    if dlist:
+        assets = _build_rsa_text_assets(client, dlist[:4], max_len=90)
+        del aga.ad.responsive_search_ad.descriptions[:]
+        aga.ad.responsive_search_ad.descriptions.extend(assets)
+        mask_paths.append("ad.responsive_search_ad.descriptions")
+    if status:
+        aga.status = _parse_ad_group_ad_status(client, status)
+        mask_paths.append("status")
+
+    op.update_mask.CopyFrom(FieldMask(paths=mask_paths))
+    try:
+        ad_group_ad_service.mutate_ad_group_ads(customer_id=cid, operations=[op])
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error updating RSA:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return UpdateResponsiveSearchAdResult(
+        customer_id=cid,
+        ad_group_id=ag_id,
+        ad_id=aid,
+        ad_group_ad_resource_name=resource_name,
+        updated_fields=tuple(mask_paths),
+    )
+
+
+def _parse_ad_group_ad_status(client: GoogleAdsClient, raw: Optional[str]) -> Any:
+    name = (raw or "").strip().upper()
+    enum = client.enums.AdGroupAdStatusEnum
+    value = getattr(enum, name, None)
+    if value is None:
+        raise GoogleAdsHelperError(f"status ad không hợp lệ: {raw!r}. Dùng ENABLED hoặc PAUSED.")
+    return value
+
+
+def update_ad_group(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    *,
+    ad_group_name: Optional[str] = None,
+    status: Optional[str] = None,
+    default_cpc: Optional[float] = None,
+) -> UpdateAdGroupResult:
+    """Cập nhật ad group Search: tên, trạng thái, CPC mặc định (MANUAL_CPC)."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if not cid or not ag_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và ad_group_id hợp lệ là bắt buộc.")
+
+    name = (ad_group_name or "").strip()
+    if not name and not status and (default_cpc is None or float(default_cpc) <= 0):
+        raise GoogleAdsHelperError(
+            "Cần ít nhất một field: ad_group_name, status hoặc default_cpc."
+        )
+
+    if default_cpc is not None and float(default_cpc) > 0:
+        cap_id = _ad_group_campaign_id(client, cid, ag_id)
+        if not _campaign_is_manual_cpc(client, cid, cap_id):
+            raise GoogleAdsHelperError(
+                "Campaign không MANUAL_CPC — không thể set default_cpc trên ad group."
+            )
+
+    ad_group_service = client.get_service("AdGroupService")
+    resource_name = ad_group_service.ad_group_path(cid, ag_id)
+    op = client.get_type("AdGroupOperation")
+    ag = op.update
+    ag.resource_name = resource_name
+    mask_paths: List[str] = []
+
+    if name:
+        ag.name = name
+        mask_paths.append("name")
+    if status:
+        ag.status = _parse_ad_group_status(client, status)
+        mask_paths.append("status")
+    if default_cpc is not None and float(default_cpc) > 0:
+        ag.cpc_bid_micros = _currency_to_micros(float(default_cpc))
+        mask_paths.append("cpc_bid_micros")
+
+    op.update_mask.CopyFrom(FieldMask(paths=mask_paths))
+    try:
+        ad_group_service.mutate_ad_groups(customer_id=cid, operations=[op])
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error updating ad group:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return UpdateAdGroupResult(
+        customer_id=cid,
+        ad_group_id=ag_id,
+        ad_group_resource_name=resource_name,
+        updated_fields=tuple(mask_paths),
+    )
+
+
+def _ad_group_campaign_id(client: GoogleAdsClient, customer_id: str, ad_group_id: str) -> str:
+    ga_service = client.get_service("GoogleAdsService")
+    q = f"""
+        SELECT campaign.id
+        FROM ad_group
+        WHERE ad_group.id = {ad_group_id}
+          AND ad_group.status != REMOVED
+        LIMIT 1
+    """.strip()
+    rows = list(ga_service.search(customer_id=customer_id, query=q))
+    if not rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy ad group {ad_group_id}.")
+    return str(rows[0].campaign.id)
+
+
+def _resolve_keyword_criterion_id(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    spec: Dict[str, Any],
+) -> str:
+    crit_id = str(spec.get("criterion_id", "") or "").strip().replace("-", "")
+    if crit_id.isdigit():
+        return crit_id
+    text = str(spec.get("text", "") or spec.get("keyword_text", "") or "").strip()
+    if not text:
+        raise GoogleAdsHelperError("Mỗi keyword cần criterion_id hoặc text.")
+    match_type = str(spec.get("match_type", "PHRASE") or "PHRASE").strip().upper()
+    ga_service = client.get_service("GoogleAdsService")
+    q = f"""
+        SELECT ad_group_criterion.criterion_id
+        FROM ad_group_criterion
+        WHERE ad_group.id = {ad_group_id}
+          AND ad_group_criterion.type = KEYWORD
+          AND ad_group_criterion.negative = FALSE
+          AND ad_group_criterion.keyword.text = {text!r}
+          AND ad_group_criterion.keyword.match_type = {match_type}
+        LIMIT 1
+    """.strip()
+    try:
+        rows = list(ga_service.search(customer_id=customer_id, query=q))
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Không tra được criterion_id cho keyword {text!r}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    if not rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy keyword {text!r} ({match_type}) trong ad group {ad_group_id}.")
+    return str(rows[0].ad_group_criterion.criterion_id)
+
+
+def update_keyword_bids(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    keywords: Iterable[Dict[str, Any]],
+) -> UpdateKeywordBidsResult:
+    """
+    Cập nhật bid/status keyword trong ad group.
+    Mỗi phần tử: {criterion_id} hoặc {text, match_type}, và tuỳ chọn cpc_bid, status.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if not cid or not ag_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và ad_group_id hợp lệ là bắt buộc.")
+
+    specs = [dict(x) for x in keywords if isinstance(x, dict)]
+    if not specs:
+        raise GoogleAdsHelperError("Cần mảng keywords với criterion_id hoặc text.")
+
+    use_manual = _campaign_is_manual_cpc(client, cid, _ad_group_campaign_id(client, cid, ag_id))
+    ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+    ops = []
+    resource_names: List[str] = []
+
+    for spec in specs:
+        crit_id = _resolve_keyword_criterion_id(client, cid, ag_id, spec)
+        resource_name = ad_group_criterion_service.ad_group_criterion_path(cid, ag_id, crit_id)
+        op = client.get_type("AdGroupCriterionOperation")
+        crit = op.update
+        crit.resource_name = resource_name
+        mask_paths: List[str] = []
+
+        cpc_raw = spec.get("cpc_bid", spec.get("default_cpc"))
+        if cpc_raw not in (None, "", 0, "0"):
+            if not use_manual:
+                raise GoogleAdsHelperError(
+                    f"Campaign auto-bid — không set cpc_bid cho keyword {crit_id}."
+                )
+            crit.cpc_bid_micros = _currency_to_micros(float(cpc_raw))
+            mask_paths.append("cpc_bid_micros")
+
+        st_raw = spec.get("status")
+        if st_raw:
+            crit.status = _parse_criterion_status(client, str(st_raw))
+            mask_paths.append("status")
+
+        if not mask_paths:
+            raise GoogleAdsHelperError(
+                f"Keyword {crit_id}: cần ít nhất cpc_bid hoặc status để cập nhật."
+            )
+        op.update_mask.CopyFrom(FieldMask(paths=mask_paths))
+        ops.append(op)
+        resource_names.append(resource_name)
+
+    try:
+        ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=ops)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error updating keywords:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return UpdateKeywordBidsResult(
+        customer_id=cid,
+        ad_group_id=ag_id,
+        updated_count=len(resource_names),
+        resource_names=tuple(resource_names),
     )
 
 

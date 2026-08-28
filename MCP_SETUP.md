@@ -52,6 +52,9 @@ Query thường dùng:
 | **Thêm từ khóa phủ định** (mutate) | POST | `/mcp/v1/add_negative_keywords` | JSON: `customer_id`, `campaign_id`, `level` (`campaign` \| `ad_group`), `keywords` `[{text, match_type}]`, `ad_group_id?` (bắt buộc nếu level=ad_group), `mcc_id?` |
 | **Thêm extension campaign** (mutate) | POST | `/mcp/v1/add_campaign_extensions` | JSON: `customer_id`, `campaign_id`, `sitelinks?`, `callouts?`, `phone_number?`, `mcc_id?` |
 | **Thêm ad group Search** vào campaign có sẵn (mutate) | POST | `/mcp/v1/add_ad_group` | JSON: `customer_id`, `campaign_id`, `ad_group_name`, `final_url`, `headlines` (≥3), `descriptions` (≥2), `keywords`, `default_cpc?` (chỉ MANUAL_CPC), `enable_ad_group?`, `mcc_id?` |
+| **Cập nhật RSA** (mutate) | POST | `/mcp/v1/update_responsive_search_ad` | JSON: `customer_id`, `ad_group_id`, `ad_id`, `final_url?`, `headlines?` (≥3), `descriptions?` (≥2), `status?`, `mcc_id?` — `ad_id` từ `/ad_performance` |
+| **Cập nhật ad group** (mutate) | POST | `/mcp/v1/update_ad_group` | JSON: `customer_id`, `ad_group_id`, `ad_group_name?`, `status?`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
+| **Cập nhật keyword bid/status** (mutate) | POST | `/mcp/v1/update_keyword_bids` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?, text?, match_type?, cpc_bid?, status?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
 | **Khám phá từ khóa mới** (Keyword Planner / GenerateKeywordIdeas) | GET hoặc POST | `/mcp/v1/generate_keyword_ideas` | `customer_id`, `keywords` (seed, CSV) hoặc `page_url`, `mcc_id?`, `language_id?` (mặc định `1040` VI), `location_ids?` (mặc định `2704` VN), `keyword_plan_network?`, `page_size?` |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |

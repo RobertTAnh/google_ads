@@ -36,7 +36,10 @@ mcp = FastMCP(
         "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED). "
         "Thêm negative keywords: ads_add_negative_keywords. "
         "Thêm extensions (sitelink/callout/call): ads_add_campaign_extensions. "
-        "Thêm ad group Search vào campaign có sẵn: ads_add_ad_group."
+        "Thêm ad group Search vào campaign có sẵn: ads_add_ad_group. "
+        "Cập nhật RSA: ads_update_responsive_search_ad. "
+        "Cập nhật ad group: ads_update_ad_group. "
+        "Cập nhật keyword bid/status: ads_update_keyword_bids."
     ),
 )
 
@@ -561,6 +564,125 @@ def ads_add_ad_group(
     if "customer_id" not in body:
         body["customer_id"] = customer_id
     return _post("/mcp/v1/add_ad_group", body)
+
+
+@mcp.tool()
+def ads_update_responsive_search_ad(
+    customer_id: str,
+    ad_group_id: str,
+    ad_id: str,
+    mcc_id: str = "",
+    final_url: str = "",
+    headlines: str = "",
+    descriptions: str = "",
+    status: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Cập nhật Responsive Search Ad có sẵn (headlines, descriptions, final_url, status).
+    ad_id lấy từ ads_get_ad_performance. headlines/descriptions: cách nhau dấu phẩy (>=3 / >=2).
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body: dict[str, Any] = {
+            "customer_id": customer_id,
+            "ad_group_id": ad_group_id,
+            "ad_id": ad_id,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if final_url.strip():
+            body["final_url"] = final_url.strip()
+        if headlines.strip():
+            body["headlines"] = [p.strip() for p in headlines.split(",") if p.strip()]
+        if descriptions.strip():
+            body["descriptions"] = [p.strip() for p in descriptions.split(",") if p.strip()]
+        if status.strip():
+            body["status"] = status.strip().upper()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/update_responsive_search_ad", body)
+
+
+@mcp.tool()
+def ads_update_ad_group(
+    customer_id: str,
+    ad_group_id: str,
+    mcc_id: str = "",
+    ad_group_name: str = "",
+    status: str = "",
+    default_cpc: float = 0,
+    payload_json: str = "",
+) -> str:
+    """
+    Cập nhật ad group Search: tên, status (ENABLED/PAUSED), default_cpc (chỉ MANUAL_CPC).
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body = {
+            "customer_id": customer_id,
+            "ad_group_id": ad_group_id,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if ad_group_name.strip():
+            body["ad_group_name"] = ad_group_name.strip()
+        if status.strip():
+            body["status"] = status.strip().upper()
+        if default_cpc and float(default_cpc) > 0:
+            body["default_cpc"] = float(default_cpc)
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/update_ad_group", body)
+
+
+@mcp.tool()
+def ads_update_keyword_bids(
+    customer_id: str,
+    ad_group_id: str,
+    keywords_json: str,
+    mcc_id: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Cập nhật bid/status keyword trong ad group.
+    keywords_json: [{\"criterion_id\":\"...\",\"cpc_bid\":15000,\"status\":\"ENABLED\"}, ...]
+    Hoặc {\"text\":\"...\",\"match_type\":\"PHRASE\", ...}. criterion_id từ ads_get_keyword_status.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        try:
+            keywords = json.loads(keywords_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        body = {
+            "customer_id": customer_id,
+            "ad_group_id": ad_group_id,
+            "keywords": keywords,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/update_keyword_bids", body)
 
 
 @mcp.tool()
