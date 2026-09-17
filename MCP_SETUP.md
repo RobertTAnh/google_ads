@@ -59,7 +59,7 @@ Query thường dùng:
 | **Thêm keyword vào ad group có sẵn** (mutate) | POST | `/mcp/v1/add_keywords` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{text, match_type?, cpc_bid?}]` hoặc `keywords_json`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
 | **Xóa keyword** (mutate) | POST | `/mcp/v1/remove_keywords` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?}]` hoặc `[{text, match_type?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
 | **Cập nhật keyword bid/status** (mutate) | POST | `/mcp/v1/update_keyword_bids` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?, text?, match_type?, cpc_bid?, status?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
-| **Cập nhật campaign** (mutate) | POST | `/mcp/v1/update_campaign` | JSON: `customer_id`, `campaign_id`, `campaign_name?`, `status?` (`ENABLED` \| `PAUSED`), `mcc_id?` |
+| **Cập nhật campaign** (mutate) | POST | `/mcp/v1/update_campaign` | JSON: `customer_id`, `campaign_id`, `campaign_name?`, `status?` (`ENABLED` \| `PAUSED` \| `REMOVED`), `mcc_id?` — `REMOVED` = xóa vĩnh viễn |
 | **Đổi ngân sách ngày campaign** (mutate) | POST | `/mcp/v1/update_campaign_budget` | JSON: `customer_id`, `campaign_id`, `daily_budget` (>0), `mcc_id?` |
 | **Khám phá từ khóa mới** (Keyword Planner / GenerateKeywordIdeas) | GET hoặc POST | `/mcp/v1/generate_keyword_ideas` | `customer_id`, `keywords` (seed, CSV) hoặc `page_url`, `mcc_id?`, `language_id?` (mặc định `1040` VI), `location_ids?` (mặc định `2704` VN), `keyword_plan_network?`, `page_size?` |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |

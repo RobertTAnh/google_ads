@@ -2753,8 +2753,10 @@ def _parse_campaign_status(client: GoogleAdsClient, raw: Optional[str]) -> Any:
     name = (raw or "").strip().upper()
     enum = client.enums.CampaignStatusEnum
     value = getattr(enum, name, None)
-    if value is None or name == "REMOVED":
-        raise GoogleAdsHelperError(f"status campaign không hợp lệ: {raw!r}. Dùng ENABLED hoặc PAUSED.")
+    if value is None or name not in ("ENABLED", "PAUSED", "REMOVED"):
+        raise GoogleAdsHelperError(
+            f"status campaign không hợp lệ: {raw!r}. Dùng ENABLED, PAUSED hoặc REMOVED."
+        )
     return value
 
 
@@ -2766,7 +2768,7 @@ def update_campaign(
     campaign_name: Optional[str] = None,
     status: Optional[str] = None,
 ) -> UpdateCampaignResult:
-    """Cập nhật campaign: tên và/hoặc status (ENABLED/PAUSED)."""
+    """Cập nhật campaign: tên và/hoặc status (ENABLED / PAUSED / REMOVED)."""
     cid = normalize_google_ads_customer_id(customer_id)
     cap_id = str(campaign_id or "").strip().replace("-", "")
     if not cid or not cap_id.isdigit():
@@ -2775,6 +2777,11 @@ def update_campaign(
     name = (campaign_name or "").strip()
     if not name and not status:
         raise GoogleAdsHelperError("Cần ít nhất một field: campaign_name hoặc status.")
+
+    if status and str(status).strip().upper() == "REMOVED" and name:
+        raise GoogleAdsHelperError(
+            "Khi xóa campaign (status=REMOVED) không đổi tên cùng lúc — chỉ truyền status=REMOVED."
+        )
 
     campaign_service = client.get_service("CampaignService")
     resource_name = campaign_service.campaign_path(cid, cap_id)

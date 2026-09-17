@@ -1770,7 +1770,7 @@ def register_mcp_routes(
 
     @bp.post("/update_campaign")
     def update_campaign_route():
-        """Cập nhật campaign: tên và/hoặc status (ENABLED/PAUSED)."""
+        """Cập nhật campaign: tên và/hoặc status (ENABLED / PAUSED / REMOVED)."""
         err = _mcp_auth_error_response()
         if err:
             return err
@@ -1791,6 +1791,10 @@ def register_mcp_routes(
             return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
         if not campaign_name and not status:
             return jsonify({"ok": False, "error": "Cần ít nhất campaign_name hoặc status."}), 400
+        if status and status not in ("ENABLED", "PAUSED", "REMOVED"):
+            return jsonify(
+                {"ok": False, "error": "status phải là ENABLED, PAUSED hoặc REMOVED."}
+            ), 400
 
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
@@ -1807,6 +1811,10 @@ def register_mcp_routes(
                     "mcc_customer_id": mcc_id,
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
+                    "note": (
+                        "status=REMOVED = xóa vĩnh viễn trên Google Ads (không hoàn tác qua API). "
+                        "PAUSED chỉ tạm dừng chi tiêu."
+                    ),
                     "result": asdict(result),
                 }
             )

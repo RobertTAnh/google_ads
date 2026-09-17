@@ -44,7 +44,7 @@ mcp = FastMCP(
         "Xóa keyword: ads_remove_keywords. "
         "Đọc copy RSA: ads_get_responsive_search_ads. "
         "List ad groups: ads_list_ad_groups. "
-        "Pause/đổi tên campaign: ads_update_campaign. "
+        "Pause/đổi tên/xóa campaign: ads_update_campaign (status=REMOVED để xóa). "
         "Đổi ngân sách ngày: ads_update_campaign_budget."
     ),
 )
@@ -808,7 +808,8 @@ def ads_update_campaign(
     payload_json: str = "",
 ) -> str:
     """
-    Cập nhật campaign: đổi tên và/hoặc status (ENABLED / PAUSED).
+    Cập nhật campaign: đổi tên và/hoặc status (ENABLED / PAUSED / REMOVED).
+    REMOVED = xóa vĩnh viễn trên Google Ads (không hoàn tác qua API).
     """
     if payload_json.strip():
         try:
