@@ -41,6 +41,7 @@ mcp = FastMCP(
         "Cập nhật ad group: ads_update_ad_group. "
         "Cập nhật keyword bid/status: ads_update_keyword_bids. "
         "Thêm keyword vào ad group có sẵn: ads_add_keywords. "
+        "Xóa keyword: ads_remove_keywords. "
         "Đọc copy RSA: ads_get_responsive_search_ads. "
         "List ad groups: ads_list_ad_groups. "
         "Pause/đổi tên campaign: ads_update_campaign. "
@@ -748,6 +749,53 @@ def ads_add_keywords(
             body["keywords"] = raw_kw_json
     body.pop("keywords_json", None)
     return _post("/mcp/v1/add_keywords", body)
+
+
+@mcp.tool()
+def ads_remove_keywords(
+    customer_id: str,
+    ad_group_id: str,
+    keywords_json: str,
+    mcc_id: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Xóa hẳn keyword khỏi ad group (REMOVE). Muốn tạm tắt dùng ads_update_keyword_bids status=PAUSED.
+    keywords_json: [{\"criterion_id\":\"...\"}, ...] hoặc [{\"text\":\"...\",\"match_type\":\"PHRASE\"}, ...]
+    criterion_id lấy từ ads_get_keyword_status.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        try:
+            keywords = json.loads(keywords_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        body = {
+            "customer_id": customer_id,
+            "ad_group_id": ad_group_id,
+            "keywords": keywords,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    if not body.get("keywords") and body.get("keywords_json"):
+        raw_kw_json = body.get("keywords_json")
+        if isinstance(raw_kw_json, str) and raw_kw_json.strip():
+            try:
+                body["keywords"] = json.loads(raw_kw_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        elif isinstance(raw_kw_json, list):
+            body["keywords"] = raw_kw_json
+    body.pop("keywords_json", None)
+    return _post("/mcp/v1/remove_keywords", body)
 
 
 @mcp.tool()

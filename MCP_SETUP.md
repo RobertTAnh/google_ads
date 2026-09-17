@@ -57,6 +57,7 @@ Query thường dùng:
 | **Cập nhật RSA** (mutate) | POST | `/mcp/v1/update_responsive_search_ad` | JSON: `customer_id`, `ad_group_id`, `ad_id`, `final_url?`, `headlines?` (≥3), `descriptions?` (≥2), `status?`, `mcc_id?` — copy qua `AdService.mutate_ads`; status qua `AdGroupAdService` |
 | **Cập nhật ad group** (mutate) | POST | `/mcp/v1/update_ad_group` | JSON: `customer_id`, `ad_group_id`, `ad_group_name?`, `status?`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
 | **Thêm keyword vào ad group có sẵn** (mutate) | POST | `/mcp/v1/add_keywords` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{text, match_type?, cpc_bid?}]` hoặc `keywords_json`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
+| **Xóa keyword** (mutate) | POST | `/mcp/v1/remove_keywords` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?}]` hoặc `[{text, match_type?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
 | **Cập nhật keyword bid/status** (mutate) | POST | `/mcp/v1/update_keyword_bids` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?, text?, match_type?, cpc_bid?, status?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
 | **Cập nhật campaign** (mutate) | POST | `/mcp/v1/update_campaign` | JSON: `customer_id`, `campaign_id`, `campaign_name?`, `status?` (`ENABLED` \| `PAUSED`), `mcc_id?` |
 | **Đổi ngân sách ngày campaign** (mutate) | POST | `/mcp/v1/update_campaign_budget` | JSON: `customer_id`, `campaign_id`, `daily_budget` (>0), `mcc_id?` |

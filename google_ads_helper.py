@@ -367,6 +367,16 @@ class AddKeywordsResult:
 
 
 @dataclass(frozen=True)
+class RemoveKeywordsResult:
+    """Kết quả xóa keyword khỏi ad group."""
+
+    customer_id: str
+    ad_group_id: str
+    removed_count: int
+    resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ResponsiveSearchAdDetail:
     """Snapshot copy RSA (headlines / descriptions / URL) — không gắn metrics kỳ."""
 
@@ -2919,6 +2929,59 @@ def update_keyword_bids(
         customer_id=cid,
         ad_group_id=ag_id,
         updated_count=len(resource_names),
+        resource_names=tuple(resource_names),
+    )
+
+
+def remove_keywords_from_ad_group(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    keywords: Iterable[Dict[str, Any]],
+) -> RemoveKeywordsResult:
+    """
+    Xóa keyword khỏi ad group (REMOVE criterion).
+    Mỗi phần tử: {criterion_id} hoặc {text, match_type}.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if not cid or not ag_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và ad_group_id hợp lệ là bắt buộc.")
+
+    specs = [dict(x) for x in keywords if isinstance(x, dict)]
+    if not specs:
+        raise GoogleAdsHelperError("Cần mảng keywords với criterion_id hoặc text.")
+
+    ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+    ops = []
+    resource_names: List[str] = []
+    seen: set[str] = set()
+
+    for spec in specs:
+        crit_id = _resolve_keyword_criterion_id(client, cid, ag_id, spec)
+        resource_name = ad_group_criterion_service.ad_group_criterion_path(cid, ag_id, crit_id)
+        if resource_name in seen:
+            continue
+        seen.add(resource_name)
+        op = client.get_type("AdGroupCriterionOperation")
+        op.remove = resource_name
+        ops.append(op)
+        resource_names.append(resource_name)
+
+    if not ops:
+        raise GoogleAdsHelperError("Không có keyword hợp lệ để xóa.")
+
+    try:
+        ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=ops)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error removing keywords:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return RemoveKeywordsResult(
+        customer_id=cid,
+        ad_group_id=ag_id,
+        removed_count=len(resource_names),
         resource_names=tuple(resource_names),
     )
 

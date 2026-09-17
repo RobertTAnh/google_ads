@@ -31,6 +31,7 @@ from google_ads_helper import (
     add_negative_keywords,
     add_search_ad_group_to_campaign,
     add_keywords_to_ad_group,
+    remove_keywords_from_ad_group,
     update_responsive_search_ad,
     update_ad_group,
     update_keyword_bids,
@@ -1664,6 +1665,59 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "note": "Thêm keyword vào ad group có sẵn. default_cpc/cpc_bid chỉ khi campaign MANUAL_CPC.",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/remove_keywords")
+    def remove_keywords_route():
+        """Xóa keyword khỏi ad group (REMOVE)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+        keywords = _parse_keyword_update_specs(body.get("keywords"))
+        if not keywords and body.get("keywords_json"):
+            raw_kw_json = body.get("keywords_json")
+            if isinstance(raw_kw_json, str) and raw_kw_json.strip():
+                try:
+                    keywords = _parse_keyword_update_specs(json.loads(raw_kw_json))
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}), 400
+            elif isinstance(raw_kw_json, list):
+                keywords = _parse_keyword_update_specs(raw_kw_json)
+
+        if not ad_group_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id."}), 400
+        if not keywords:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần keywords: [{criterion_id?}] hoặc [{text, match_type?}].",
+                }
+            ), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = remove_keywords_from_ad_group(client, cid, ad_group_id, keywords)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "Xóa hẳn keyword (REMOVE). Muốn tạm tắt dùng ads_update_keyword_bids status=PAUSED.",
                     "result": asdict(result),
                 }
             )
