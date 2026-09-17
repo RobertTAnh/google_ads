@@ -40,7 +40,11 @@ mcp = FastMCP(
         "Cập nhật RSA: ads_update_responsive_search_ad. "
         "Cập nhật ad group: ads_update_ad_group. "
         "Cập nhật keyword bid/status: ads_update_keyword_bids. "
-        "Thêm keyword vào ad group có sẵn: ads_add_keywords."
+        "Thêm keyword vào ad group có sẵn: ads_add_keywords. "
+        "Đọc copy RSA: ads_get_responsive_search_ads. "
+        "List ad groups: ads_list_ad_groups. "
+        "Pause/đổi tên campaign: ads_update_campaign. "
+        "Đổi ngân sách ngày: ads_update_campaign_budget."
     ),
 )
 
@@ -163,6 +167,41 @@ def ads_list_child_accounts(mcc_id: str = "") -> str:
 def ads_list_campaigns(customer_id: str, mcc_id: str = "") -> str:
     """Danh sách chiến dịch (metadata: trạng thái, loại kênh), không theo kỳ ngày."""
     return _get("/mcp/v1/list_campaigns", {"customer_id": customer_id, "mcc_id": mcc_id or None})
+
+
+@mcp.tool()
+def ads_list_ad_groups(customer_id: str, mcc_id: str = "", campaign_id: str = "") -> str:
+    """Danh sách ad group (id, tên, status). Lọc theo campaign_id nếu truyền."""
+    p: dict[str, Any] = {"customer_id": customer_id}
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    return _get("/mcp/v1/list_ad_groups", p)
+
+
+@mcp.tool()
+def ads_get_responsive_search_ads(
+    customer_id: str,
+    mcc_id: str = "",
+    ad_id: str = "",
+    ad_group_id: str = "",
+    campaign_id: str = "",
+) -> str:
+    """
+    Đọc copy RSA hiện tại: headlines, descriptions, final_urls, path1/path2.
+    Lọc tùy chọn theo ad_id / ad_group_id / campaign_id.
+    """
+    p: dict[str, Any] = {"customer_id": customer_id}
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    if ad_id.strip():
+        p["ad_id"] = ad_id.strip()
+    if ad_group_id.strip():
+        p["ad_group_id"] = ad_group_id.strip()
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    return _get("/mcp/v1/responsive_search_ads", p)
 
 
 @mcp.tool()
@@ -709,6 +748,72 @@ def ads_add_keywords(
             body["keywords"] = raw_kw_json
     body.pop("keywords_json", None)
     return _post("/mcp/v1/add_keywords", body)
+
+
+@mcp.tool()
+def ads_update_campaign(
+    customer_id: str,
+    campaign_id: str,
+    mcc_id: str = "",
+    campaign_name: str = "",
+    status: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Cập nhật campaign: đổi tên và/hoặc status (ENABLED / PAUSED).
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body = {
+            "customer_id": customer_id,
+            "campaign_id": campaign_id,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if campaign_name.strip():
+            body["campaign_name"] = campaign_name.strip()
+        if status.strip():
+            body["status"] = status.strip().upper()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/update_campaign", body)
+
+
+@mcp.tool()
+def ads_update_campaign_budget(
+    customer_id: str,
+    campaign_id: str,
+    daily_budget: float,
+    mcc_id: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Đổi ngân sách ngày (daily_budget) của campaign. Số tiền theo đơn vị tiền tệ tài khoản (vd VND).
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body = {
+            "customer_id": customer_id,
+            "campaign_id": campaign_id,
+            "daily_budget": float(daily_budget),
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/update_campaign_budget", body)
 
 
 @mcp.tool()

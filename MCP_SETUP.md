@@ -38,6 +38,8 @@ Query thường dùng:
 |----------|--------|------|--------|
 | Tài khoản con dưới MCC | GET | `/mcp/v1/child_accounts` | `mcc_id?` |
 | Danh sách chiến dịch (metadata) | GET | `/mcp/v1/list_campaigns` | `customer_id`, `mcc_id?` |
+| **Danh sách ad group** (metadata) | GET | `/mcp/v1/list_ad_groups` | `customer_id`, `mcc_id?`, `campaign_id?` |
+| **Đọc copy RSA** (headlines/descriptions) | GET | `/mcp/v1/responsive_search_ads` | `customer_id`, `mcc_id?`, `ad_id?`, `ad_group_id?`, `campaign_id?` |
 | **Target CPA / ROAS cấu hình** (bidding, không phải CPA thực tế) | GET | `/mcp/v1/campaign_bidding` | `customer_id`, `mcc_id?` |
 | Metrics theo campaign (gộp kỳ + CPA) | GET | `/mcp/v1/campaign_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Metrics cấp tài khoản (gộp kỳ + CPA) | GET | `/mcp/v1/customer_performance` | `customer_id`, `mcc_id?`, `date_range?` |
@@ -56,6 +58,8 @@ Query thường dùng:
 | **Cập nhật ad group** (mutate) | POST | `/mcp/v1/update_ad_group` | JSON: `customer_id`, `ad_group_id`, `ad_group_name?`, `status?`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
 | **Thêm keyword vào ad group có sẵn** (mutate) | POST | `/mcp/v1/add_keywords` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{text, match_type?, cpc_bid?}]` hoặc `keywords_json`, `default_cpc?` (chỉ MANUAL_CPC), `mcc_id?` |
 | **Cập nhật keyword bid/status** (mutate) | POST | `/mcp/v1/update_keyword_bids` | JSON: `customer_id`, `ad_group_id`, `keywords` `[{criterion_id?, text?, match_type?, cpc_bid?, status?}]`, `mcc_id?` — `criterion_id` từ `/keyword_status` |
+| **Cập nhật campaign** (mutate) | POST | `/mcp/v1/update_campaign` | JSON: `customer_id`, `campaign_id`, `campaign_name?`, `status?` (`ENABLED` \| `PAUSED`), `mcc_id?` |
+| **Đổi ngân sách ngày campaign** (mutate) | POST | `/mcp/v1/update_campaign_budget` | JSON: `customer_id`, `campaign_id`, `daily_budget` (>0), `mcc_id?` |
 | **Khám phá từ khóa mới** (Keyword Planner / GenerateKeywordIdeas) | GET hoặc POST | `/mcp/v1/generate_keyword_ideas` | `customer_id`, `keywords` (seed, CSV) hoặc `page_url`, `mcc_id?`, `language_id?` (mặc định `1040` VI), `location_ids?` (mặc định `2704` VN), `keyword_plan_network?`, `page_size?` |
 | Nhóm quảng cáo + metrics kỳ | GET | `/mcp/v1/ad_group_performance` | `customer_id`, `mcc_id?`, `date_range?` |
 | Quality score lịch sử (keyword) | GET | `/mcp/v1/keyword_quality_score` | `customer_id`, `mcc_id?`, `date_range?` |

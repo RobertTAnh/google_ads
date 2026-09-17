@@ -34,6 +34,10 @@ from google_ads_helper import (
     update_responsive_search_ad,
     update_ad_group,
     update_keyword_bids,
+    update_campaign,
+    update_campaign_budget,
+    list_responsive_search_ads,
+    list_ad_groups_for_customer,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -253,6 +257,94 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "campaigns": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/list_ad_groups")
+    def list_ad_groups():
+        """Danh sách ad group (metadata), không theo kỳ ngày."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = list_ad_groups_for_customer(client, cid, campaign_id=campaign_id)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "campaign_id": campaign_id,
+                    "ad_groups": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/responsive_search_ads")
+    def responsive_search_ads():
+        """Đọc copy RSA hiện tại (headlines, descriptions, final_urls)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        def _digits(name: str) -> str | None:
+            raw = (request.args.get(name) or "").strip()
+            if not raw:
+                return None
+            digits = "".join(ch for ch in raw if ch.isdigit())
+            if not digits:
+                raise ValueError(f"{name} không hợp lệ.")
+            return digits
+
+        try:
+            ad_id = _digits("ad_id")
+            ad_group_id = _digits("ad_group_id")
+            campaign_id = _digits("campaign_id")
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = list_responsive_search_ads(
+                client,
+                cid,
+                ad_id=ad_id,
+                ad_group_id=ad_group_id,
+                campaign_id=campaign_id,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "Snapshot copy RSA hiện tại; không gắn metrics kỳ.",
+                    "rows": [asdict(r) for r in rows],
                 }
             )
         except GoogleAdsHelperError as e:
@@ -1616,6 +1708,93 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "note": "criterion_id từ ads_get_keyword_status; cpc_bid chỉ khi campaign MANUAL_CPC.",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/update_campaign")
+    def update_campaign_route():
+        """Cập nhật campaign: tên và/hoặc status (ENABLED/PAUSED)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
+        campaign_name = str(body.get("campaign_name", "") or "").strip() or None
+        status = str(body.get("status", "") or "").strip().upper() or None
+
+        if not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+        if not campaign_name and not status:
+            return jsonify({"ok": False, "error": "Cần ít nhất campaign_name hoặc status."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = update_campaign(
+                client,
+                cid,
+                campaign_id,
+                campaign_name=campaign_name,
+                status=status,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/update_campaign_budget")
+    def update_campaign_budget_route():
+        """Đổi ngân sách ngày của campaign."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
+        try:
+            daily_budget = float(body.get("daily_budget", 0) or 0)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "daily_budget không hợp lệ."}), 400
+
+        if not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+        if daily_budget <= 0:
+            return jsonify({"ok": False, "error": "daily_budget phải > 0."}), 400
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = update_campaign_budget(client, cid, campaign_id, daily_budget=daily_budget)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "Số tiền theo đơn vị tiền tệ tài khoản (vd VND).",
                     "result": asdict(result),
                 }
             )

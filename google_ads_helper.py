@@ -367,6 +367,57 @@ class AddKeywordsResult:
 
 
 @dataclass(frozen=True)
+class ResponsiveSearchAdDetail:
+    """Snapshot copy RSA (headlines / descriptions / URL) — không gắn metrics kỳ."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    ad_id: str
+    status: str
+    final_urls: Tuple[str, ...]
+    headlines: Tuple[str, ...]
+    descriptions: Tuple[str, ...]
+    path1: str
+    path2: str
+
+
+@dataclass(frozen=True)
+class AdGroupMetadataRow:
+    """Danh sách ad group (metadata), bỏ REMOVED."""
+
+    customer_id: str
+    customer_name: str
+    campaign_id: str
+    campaign_name: str
+    ad_group_id: str
+    ad_group_name: str
+    status: str
+    ad_group_type: str
+    cpc_bid: Optional[float]
+
+
+@dataclass(frozen=True)
+class UpdateCampaignResult:
+    customer_id: str
+    campaign_id: str
+    campaign_resource_name: str
+    updated_fields: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class UpdateCampaignBudgetResult:
+    customer_id: str
+    campaign_id: str
+    budget_resource_name: str
+    old_daily_budget: Optional[float]
+    new_daily_budget: float
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -2526,6 +2577,280 @@ def add_keywords_to_ad_group(
         campaign_id=cap_id,
         added_count=len(resource_names),
         resource_names=resource_names,
+    )
+
+
+def _ad_text_asset_texts(assets: Any) -> Tuple[str, ...]:
+    out: List[str] = []
+    for asset in assets or []:
+        text = str(getattr(asset, "text", "") or "").strip()
+        if text:
+            out.append(text)
+    return tuple(out)
+
+
+def list_responsive_search_ads(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    ad_id: Optional[str] = None,
+    ad_group_id: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> List[ResponsiveSearchAdDetail]:
+    """Đọc copy RSA hiện tại (headlines, descriptions, final_urls)."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    where_extra = ""
+    aid = str(ad_id or "").strip().replace("-", "")
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if aid:
+        if not aid.isdigit():
+            raise GoogleAdsHelperError("ad_id không hợp lệ.")
+        where_extra += f"\n          AND ad_group_ad.ad.id = {aid}"
+    if ag_id:
+        if not ag_id.isdigit():
+            raise GoogleAdsHelperError("ad_group_id không hợp lệ.")
+        where_extra += f"\n          AND ad_group.id = {ag_id}"
+    if cap_id:
+        if not cap_id.isdigit():
+            raise GoogleAdsHelperError("campaign_id không hợp lệ.")
+        where_extra += f"\n          AND campaign.id = {cap_id}"
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group_ad.ad.id,
+          ad_group_ad.status,
+          ad_group_ad.ad.final_urls,
+          ad_group_ad.ad.responsive_search_ad.headlines,
+          ad_group_ad.ad.responsive_search_ad.descriptions,
+          ad_group_ad.ad.responsive_search_ad.path1,
+          ad_group_ad.ad.responsive_search_ad.path2
+        FROM ad_group_ad
+        WHERE ad_group_ad.status != REMOVED
+          AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+          {where_extra}
+        ORDER BY campaign.name, ad_group.name, ad_group_ad.ad.id
+    """.strip()
+
+    rows: List[ResponsiveSearchAdDetail] = []
+    try:
+        stream = ga_service.search_stream(customer_id=cid, query=query)
+        for batch in stream:
+            for r in batch.results:
+                ad = r.ad_group_ad.ad
+                rsa = ad.responsive_search_ad
+                rows.append(
+                    ResponsiveSearchAdDetail(
+                        customer_id=str(r.customer.id),
+                        customer_name=str(r.customer.descriptive_name or ""),
+                        campaign_id=str(r.campaign.id),
+                        campaign_name=str(r.campaign.name or ""),
+                        ad_group_id=str(r.ad_group.id),
+                        ad_group_name=str(r.ad_group.name or ""),
+                        ad_id=str(ad.id),
+                        status=_proto_enum_name(getattr(r.ad_group_ad, "status", None)),
+                        final_urls=tuple(str(u) for u in (ad.final_urls or []) if str(u).strip()),
+                        headlines=_ad_text_asset_texts(rsa.headlines),
+                        descriptions=_ad_text_asset_texts(rsa.descriptions),
+                        path1=str(getattr(rsa, "path1", "") or ""),
+                        path2=str(getattr(rsa, "path2", "") or ""),
+                    )
+                )
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error listing RSA for customer {cid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+    return rows
+
+
+def list_ad_groups_for_customer(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_id: Optional[str] = None,
+) -> List[AdGroupMetadataRow]:
+    """Danh sách ad group (metadata), bỏ REMOVED."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    where_extra = ""
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if cap_id:
+        if not cap_id.isdigit():
+            raise GoogleAdsHelperError("campaign_id không hợp lệ.")
+        where_extra = f"\n          AND campaign.id = {cap_id}"
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          ad_group.status,
+          ad_group.type,
+          ad_group.cpc_bid_micros
+        FROM ad_group
+        WHERE ad_group.status != REMOVED
+          {where_extra}
+        ORDER BY campaign.name, ad_group.name
+    """.strip()
+
+    rows: List[AdGroupMetadataRow] = []
+    try:
+        stream = ga_service.search_stream(customer_id=cid, query=query)
+        for batch in stream:
+            for r in batch.results:
+                ag = r.ad_group
+                rows.append(
+                    AdGroupMetadataRow(
+                        customer_id=str(r.customer.id),
+                        customer_name=str(r.customer.descriptive_name or ""),
+                        campaign_id=str(r.campaign.id),
+                        campaign_name=str(r.campaign.name or ""),
+                        ad_group_id=str(ag.id),
+                        ad_group_name=str(ag.name or ""),
+                        status=_proto_enum_name(getattr(ag, "status", None)),
+                        ad_group_type=_proto_enum_name(getattr(ag, "type_", None)),
+                        cpc_bid=_micros_to_currency(getattr(ag, "cpc_bid_micros", None)),
+                    )
+                )
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error listing ad groups for customer {cid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+    return rows
+
+
+def _parse_campaign_status(client: GoogleAdsClient, raw: Optional[str]) -> Any:
+    name = (raw or "").strip().upper()
+    enum = client.enums.CampaignStatusEnum
+    value = getattr(enum, name, None)
+    if value is None or name == "REMOVED":
+        raise GoogleAdsHelperError(f"status campaign không hợp lệ: {raw!r}. Dùng ENABLED hoặc PAUSED.")
+    return value
+
+
+def update_campaign(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_id: str,
+    *,
+    campaign_name: Optional[str] = None,
+    status: Optional[str] = None,
+) -> UpdateCampaignResult:
+    """Cập nhật campaign: tên và/hoặc status (ENABLED/PAUSED)."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if not cid or not cap_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+
+    name = (campaign_name or "").strip()
+    if not name and not status:
+        raise GoogleAdsHelperError("Cần ít nhất một field: campaign_name hoặc status.")
+
+    campaign_service = client.get_service("CampaignService")
+    resource_name = campaign_service.campaign_path(cid, cap_id)
+    op = client.get_type("CampaignOperation")
+    camp = op.update
+    camp.resource_name = resource_name
+    mask_paths: List[str] = []
+    if name:
+        camp.name = name
+        mask_paths.append("name")
+    if status:
+        camp.status = _parse_campaign_status(client, status)
+        mask_paths.append("status")
+    op.update_mask.CopyFrom(FieldMask(paths=mask_paths))
+    try:
+        campaign_service.mutate_campaigns(customer_id=cid, operations=[op])
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error updating campaign:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    return UpdateCampaignResult(
+        customer_id=cid,
+        campaign_id=cap_id,
+        campaign_resource_name=resource_name,
+        updated_fields=tuple(mask_paths),
+    )
+
+
+def update_campaign_budget(
+    client: GoogleAdsClient,
+    customer_id: str,
+    campaign_id: str,
+    *,
+    daily_budget: float,
+) -> UpdateCampaignBudgetResult:
+    """Đổi ngân sách ngày của campaign (campaign budget amount_micros)."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if not cid or not cap_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+    if daily_budget is None or float(daily_budget) <= 0:
+        raise GoogleAdsHelperError("daily_budget phải > 0.")
+
+    ga_service = client.get_service("GoogleAdsService")
+    q = f"""
+        SELECT
+          campaign.id,
+          campaign.campaign_budget,
+          campaign_budget.amount_micros
+        FROM campaign
+        WHERE campaign.id = {cap_id}
+          AND campaign.status != REMOVED
+        LIMIT 1
+    """.strip()
+    try:
+        rows = list(ga_service.search(customer_id=cid, query=q))
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Không đọc được budget campaign {cap_id}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    if not rows:
+        raise GoogleAdsHelperError(f"Không tìm thấy campaign {cap_id}.")
+
+    budget_rn = str(rows[0].campaign.campaign_budget or "")
+    if not budget_rn:
+        raise GoogleAdsHelperError(f"Campaign {cap_id} không có campaign_budget.")
+    old_amount = _micros_to_currency(getattr(rows[0].campaign_budget, "amount_micros", None))
+
+    budget_service = client.get_service("CampaignBudgetService")
+    op = client.get_type("CampaignBudgetOperation")
+    op.update.resource_name = budget_rn
+    op.update.amount_micros = _currency_to_micros(float(daily_budget))
+    op.update_mask.CopyFrom(FieldMask(paths=["amount_micros"]))
+    try:
+        budget_service.mutate_campaign_budgets(customer_id=cid, operations=[op])
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error updating campaign budget:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    return UpdateCampaignBudgetResult(
+        customer_id=cid,
+        campaign_id=cap_id,
+        budget_resource_name=budget_rn,
+        old_daily_budget=old_amount,
+        new_daily_budget=float(daily_budget),
     )
 
 
