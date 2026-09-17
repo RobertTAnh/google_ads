@@ -356,6 +356,17 @@ class UpdateKeywordBidsResult:
 
 
 @dataclass(frozen=True)
+class AddKeywordsResult:
+    """Kết quả thêm keyword vào ad group Search có sẵn."""
+
+    customer_id: str
+    ad_group_id: str
+    campaign_id: str
+    added_count: int
+    resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -2434,6 +2445,88 @@ def _resolve_keyword_criterion_id(
     if not rows:
         raise GoogleAdsHelperError(f"Không tìm thấy keyword {text!r} ({match_type}) trong ad group {ad_group_id}.")
     return str(rows[0].ad_group_criterion.criterion_id)
+
+
+def add_keywords_to_ad_group(
+    client: GoogleAdsClient,
+    customer_id: str,
+    ad_group_id: str,
+    keywords: Iterable[Dict[str, Any]],
+    *,
+    default_cpc: Optional[float] = None,
+) -> AddKeywordsResult:
+    """
+    Thêm keyword mới vào ad group Search đã có.
+    Mỗi phần tử: {text, match_type?} và tuỳ chọn cpc_bid (chỉ MANUAL_CPC).
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if not cid or not ag_id.isdigit():
+        raise GoogleAdsHelperError("customer_id và ad_group_id hợp lệ là bắt buộc.")
+
+    kw_specs: List[Dict[str, Any]] = []
+    for item in keywords:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "") or item.get("keyword_text", "") or "").strip()
+        if not text:
+            continue
+        spec: Dict[str, Any] = {
+            "text": text,
+            "match_type": str(item.get("match_type", "PHRASE") or "PHRASE"),
+        }
+        cpc_raw = item.get("cpc_bid", item.get("default_cpc"))
+        if cpc_raw not in (None, "", 0, "0"):
+            spec["cpc_bid"] = float(cpc_raw)
+        kw_specs.append(spec)
+    if not kw_specs:
+        raise GoogleAdsHelperError("Cần mảng keywords với text (và match_type tuỳ chọn).")
+
+    cap_id = _ad_group_campaign_id(client, cid, ag_id)
+    use_manual = _campaign_is_manual_cpc(client, cid, cap_id)
+    if default_cpc is not None and float(default_cpc) > 0 and not use_manual:
+        raise GoogleAdsHelperError(
+            "Campaign không MANUAL_CPC — bỏ default_cpc / cpc_bid (campaign auto-bid tự giá thầu)."
+        )
+    for spec in kw_specs:
+        if "cpc_bid" in spec and not use_manual:
+            raise GoogleAdsHelperError(
+                f"Campaign auto-bid — không set cpc_bid cho keyword {spec['text']!r}."
+            )
+
+    ad_group_service = client.get_service("AdGroupService")
+    ad_group_resource_name = ad_group_service.ad_group_path(cid, ag_id)
+    ad_group_criterion_service = client.get_service("AdGroupCriterionService")
+    ops = []
+    for spec in kw_specs:
+        op = client.get_type("AdGroupCriterionOperation")
+        crit = op.create
+        crit.ad_group = ad_group_resource_name
+        crit.status = client.enums.AdGroupCriterionStatusEnum.ENABLED
+        crit.keyword.text = spec["text"]
+        crit.keyword.match_type = _parse_keyword_match_type(client, spec["match_type"])
+        bid = spec.get("cpc_bid")
+        if bid is None and default_cpc is not None and float(default_cpc) > 0:
+            bid = float(default_cpc)
+        if use_manual and bid is not None and float(bid) > 0:
+            crit.cpc_bid_micros = _currency_to_micros(float(bid))
+        ops.append(op)
+
+    try:
+        resp = ad_group_criterion_service.mutate_ad_group_criteria(customer_id=cid, operations=ops)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error adding keywords:\n{_format_googleads_exception(ex)}"
+        ) from ex
+
+    resource_names = tuple(str(r.resource_name) for r in resp.results)
+    return AddKeywordsResult(
+        customer_id=cid,
+        ad_group_id=ag_id,
+        campaign_id=cap_id,
+        added_count=len(resource_names),
+        resource_names=resource_names,
+    )
 
 
 def update_keyword_bids(

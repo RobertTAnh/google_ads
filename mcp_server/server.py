@@ -39,7 +39,8 @@ mcp = FastMCP(
         "Thêm ad group Search vào campaign có sẵn: ads_add_ad_group. "
         "Cập nhật RSA: ads_update_responsive_search_ad. "
         "Cập nhật ad group: ads_update_ad_group. "
-        "Cập nhật keyword bid/status: ads_update_keyword_bids."
+        "Cập nhật keyword bid/status: ads_update_keyword_bids. "
+        "Thêm keyword vào ad group có sẵn: ads_add_keywords."
     ),
 )
 
@@ -658,6 +659,56 @@ def ads_update_ad_group(
     if "customer_id" not in body:
         body["customer_id"] = customer_id
     return _post("/mcp/v1/update_ad_group", body)
+
+
+@mcp.tool()
+def ads_add_keywords(
+    customer_id: str,
+    ad_group_id: str,
+    keywords_json: str,
+    mcc_id: str = "",
+    default_cpc: float = 0,
+    payload_json: str = "",
+) -> str:
+    """
+    Thêm keyword mới vào ad group Search đã có (không tạo ad group mới).
+    keywords_json: [{\"text\":\"...\",\"match_type\":\"PHRASE\"}, ...]
+    default_cpc / cpc_bid trong từng keyword chỉ khi campaign MANUAL_CPC.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        try:
+            keywords = json.loads(keywords_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        body = {
+            "customer_id": customer_id,
+            "ad_group_id": ad_group_id,
+            "keywords": keywords,
+        }
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if default_cpc and float(default_cpc) > 0:
+            body["default_cpc"] = float(default_cpc)
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    if not body.get("keywords") and body.get("keywords_json"):
+        raw_kw_json = body.get("keywords_json")
+        if isinstance(raw_kw_json, str) and raw_kw_json.strip():
+            try:
+                body["keywords"] = json.loads(raw_kw_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"keywords_json không hợp lệ: {e}"}, ensure_ascii=False)
+        elif isinstance(raw_kw_json, list):
+            body["keywords"] = raw_kw_json
+    body.pop("keywords_json", None)
+    return _post("/mcp/v1/add_keywords", body)
 
 
 @mcp.tool()
