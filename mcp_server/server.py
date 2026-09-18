@@ -35,7 +35,7 @@ mcp = FastMCP(
         "Search terms Search: ads_search_term_performance; PMax: ads_pmax_search_term_insights. "
         "Tạo campaign mới (mutate): ads_create_campaign (SEARCH hoặc PERFORMANCE_MAX; mặc định PAUSED). "
         "Thêm negative keywords: ads_add_negative_keywords. "
-        "Thêm extensions (sitelink/callout/call): ads_add_campaign_extensions. "
+        "Thêm extensions (sitelink/callout/call) mọi cấp: ads_add_campaign_extensions (level=customer|campaign|ad_group). "
         "Thêm ad group Search vào campaign có sẵn: ads_add_ad_group. "
         "Cập nhật RSA: ads_update_responsive_search_ad. "
         "Cập nhật ad group: ads_update_ad_group. "
@@ -519,20 +519,26 @@ def ads_add_negative_keywords(
 @mcp.tool()
 def ads_add_campaign_extensions(
     customer_id: str,
-    campaign_id: str,
+    campaign_id: str = "",
     mcc_id: str = "",
+    level: str = "campaign",
+    ad_group_id: str = "",
     sitelinks_json: str = "",
     callouts: str = "",
+    callouts_json: str = "",
     phone_number: str = "",
     phone_country_code: str = "VN",
     payload_json: str = "",
 ) -> str:
     """
-    Gắn extension lên campaign có sẵn: Sitelink, Callout, Call (số điện thoại).
+    Gắn extension Sitelink / Callout / Call ở mọi cấp:
+    - level=customer (account): toàn tài khoản — không cần campaign_id
+    - level=campaign: cần campaign_id
+    - level=ad_group: cần ad_group_id (gắn đúng 1 nhóm quảng cáo)
 
     sitelinks_json: [{\"link_text\":\"...\",\"final_url\":\"https://...\",\"description1\":\"?\",\"description2\":\"?\"}]
-    callouts: chú thích, cách nhau dấu phẩy.
-    phone_number + phone_country_code (mặc định VN) cho Call extension.
+    callouts_json: [\"Chú thích 1\",\"Chú thích 2\"] (ưu tiên hơn callouts CSV).
+    callouts: CSV cách nhau dấu phẩy (dễ cắt nhầm nếu text có dấu phẩy — nên dùng callouts_json).
     Hoặc payload_json (JSON đầy đủ).
     """
     if payload_json.strip():
@@ -545,24 +551,33 @@ def ads_add_campaign_extensions(
     else:
         body = {
             "customer_id": customer_id,
-            "campaign_id": campaign_id,
+            "level": (level or "campaign").strip().lower() or "campaign",
             "phone_country_code": phone_country_code or "VN",
         }
         if mcc_id.strip():
             body["mcc_id"] = mcc_id.strip()
+        if campaign_id.strip():
+            body["campaign_id"] = campaign_id.strip()
+        if ad_group_id.strip():
+            body["ad_group_id"] = ad_group_id.strip()
         if sitelinks_json.strip():
             try:
                 body["sitelinks"] = json.loads(sitelinks_json)
             except json.JSONDecodeError as e:
                 return json.dumps({"ok": False, "error": f"sitelinks_json không hợp lệ: {e}"}, ensure_ascii=False)
-        if callouts.strip():
+        if callouts_json.strip():
+            try:
+                body["callouts"] = json.loads(callouts_json)
+            except json.JSONDecodeError as e:
+                return json.dumps({"ok": False, "error": f"callouts_json không hợp lệ: {e}"}, ensure_ascii=False)
+        elif callouts.strip():
             body["callouts"] = [p.strip() for p in callouts.split(",") if p.strip()]
         if phone_number.strip():
             body["phone_number"] = phone_number.strip()
     if "customer_id" not in body:
         body["customer_id"] = customer_id
-    if "campaign_id" not in body:
-        body["campaign_id"] = campaign_id
+    if not body.get("level"):
+        body["level"] = (level or "campaign").strip().lower() or "campaign"
     return _post("/mcp/v1/add_campaign_extensions", body)
 
 

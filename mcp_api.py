@@ -1343,7 +1343,7 @@ def register_mcp_routes(
 
     @bp.post("/add_campaign_extensions")
     def add_campaign_extensions_route():
-        """Gắn Sitelink, Callout, Call extension lên campaign có sẵn."""
+        """Gắn Sitelink, Callout, Call ở cấp customer / campaign / ad_group."""
         err = _mcp_auth_error_response()
         if err:
             return err
@@ -1356,12 +1356,44 @@ def register_mcp_routes(
             return resolved[2]
         cid, mcc_id, mcc_resolved_via = resolved
 
+        level = str(body.get("level", "campaign") or "campaign").strip().lower()
+        if level in ("account", "customer_level"):
+            level = "customer"
+        if level not in ("customer", "campaign", "ad_group"):
+            return jsonify(
+                {"ok": False, "error": "level phải là customer, campaign hoặc ad_group."}
+            ), 400
+
         campaign_id = "".join(ch for ch in str(body.get("campaign_id", "") or "") if ch.isdigit())
-        if not campaign_id:
-            return jsonify({"ok": False, "error": "Thiếu campaign_id."}), 400
+        ad_group_id = "".join(ch for ch in str(body.get("ad_group_id", "") or "") if ch.isdigit())
+
+        if level == "campaign" and not campaign_id:
+            return jsonify({"ok": False, "error": "Thiếu campaign_id khi level=campaign."}), 400
+        if level == "ad_group" and not ad_group_id:
+            return jsonify({"ok": False, "error": "Thiếu ad_group_id khi level=ad_group."}), 400
 
         sitelinks = _parse_sitelink_specs(body.get("sitelinks"))
+        if not sitelinks and body.get("sitelinks_json"):
+            raw_sl = body.get("sitelinks_json")
+            if isinstance(raw_sl, str) and raw_sl.strip():
+                try:
+                    sitelinks = _parse_sitelink_specs(json.loads(raw_sl))
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "error": f"sitelinks_json không hợp lệ: {e}"}), 400
+            elif isinstance(raw_sl, list):
+                sitelinks = _parse_sitelink_specs(raw_sl)
+
         callouts = _parse_string_list(body.get("callouts"))
+        if not callouts and body.get("callouts_json"):
+            raw_co = body.get("callouts_json")
+            if isinstance(raw_co, str) and raw_co.strip():
+                try:
+                    parsed = json.loads(raw_co)
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "error": f"callouts_json không hợp lệ: {e}"}), 400
+                callouts = _parse_string_list(parsed)
+            elif isinstance(raw_co, list):
+                callouts = _parse_string_list(raw_co)
 
         phone_number = ""
         phone_country_code = "VN"
@@ -1390,6 +1422,8 @@ def register_mcp_routes(
                 client,
                 cid,
                 campaign_id,
+                level=level,
+                ad_group_id=ad_group_id or None,
                 sitelinks=sitelinks,
                 callouts=callouts,
                 phone_number=phone_number,
@@ -1401,8 +1435,10 @@ def register_mcp_routes(
                     "mcc_customer_id": mcc_id,
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
-                    "campaign_id": campaign_id,
-                    "note": "Đã tạo Asset và gắn vào campaign qua CampaignAsset.",
+                    "note": (
+                        "level=customer → CustomerAsset; campaign → CampaignAsset; "
+                        "ad_group → AdGroupAsset. Callout dùng field callout_text."
+                    ),
                     "result": asdict(result),
                 }
             )

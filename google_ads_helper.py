@@ -305,15 +305,19 @@ class AddNegativeKeywordsResult:
 
 @dataclass(frozen=True)
 class AddCampaignExtensionsResult:
-    """Kết quả gắn extension (asset) lên campaign có sẵn."""
+    """Kết quả gắn extension (asset) lên customer / campaign / ad group."""
 
     customer_id: str
+    level: str  # customer | campaign | ad_group
     campaign_id: str
+    ad_group_id: str
     sitelink_count: int
     callout_count: int
     call_added: bool
     asset_resource_names: Tuple[str, ...]
-    campaign_asset_resource_names: Tuple[str, ...]
+    asset_link_resource_names: Tuple[str, ...]
+    # Alias cũ — giữ để agent/JSON cũ không vỡ
+    campaign_asset_resource_names: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1954,21 +1958,38 @@ def add_negative_keywords(
 def add_campaign_extensions(
     client: GoogleAdsClient,
     customer_id: str,
-    campaign_id: str,
+    campaign_id: str = "",
     *,
+    level: str = "campaign",
+    ad_group_id: Optional[str] = None,
     sitelinks: Optional[Iterable[Dict[str, str]]] = None,
     callouts: Optional[Iterable[str]] = None,
     phone_number: str = "",
     phone_country_code: str = "VN",
 ) -> AddCampaignExtensionsResult:
     """
-    Gắn extension text lên campaign có sẵn: Sitelink, Callout, Call (số điện thoại).
-    Tạo Asset rồi liên kết qua CampaignAssetService.
+    Gắn extension text: Sitelink, Callout, Call.
+    level: customer | campaign | ad_group
+    - customer: CustomerAsset (toàn tài khoản)
+    - campaign: CampaignAsset (cần campaign_id)
+    - ad_group: AdGroupAsset (cần ad_group_id; campaign_id tuỳ chọn)
     """
     cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    lvl = (level or "campaign").strip().lower().replace("-", "_")
+    if lvl in ("account", "customer_level"):
+        lvl = "customer"
+    if lvl not in ("customer", "campaign", "ad_group"):
+        raise GoogleAdsHelperError("level phải là customer, campaign hoặc ad_group.")
+
     cap_id = str(campaign_id or "").strip().replace("-", "")
-    if not cid or not cap_id.isdigit():
-        raise GoogleAdsHelperError("customer_id và campaign_id hợp lệ là bắt buộc.")
+    ag_id = str(ad_group_id or "").strip().replace("-", "")
+    if lvl == "campaign" and not cap_id.isdigit():
+        raise GoogleAdsHelperError("campaign_id bắt buộc khi level=campaign.")
+    if lvl == "ad_group" and not ag_id.isdigit():
+        raise GoogleAdsHelperError("ad_group_id bắt buộc khi level=ad_group.")
 
     sitelink_specs: List[Dict[str, str]] = []
     for item in sitelinks or []:
@@ -1995,23 +2016,52 @@ def add_campaign_extensions(
             "Cần ít nhất một trong: sitelinks, callouts, phone_number (call extension)."
         )
 
-    campaign_service = client.get_service("CampaignService")
     asset_service = client.get_service("AssetService")
-    campaign_asset_service = client.get_service("CampaignAssetService")
-    campaign_resource = campaign_service.campaign_path(cid, cap_id)
     field_enum = client.enums.AssetFieldTypeEnum
-
     asset_resource_names: List[str] = []
-    campaign_asset_resource_names: List[str] = []
+    link_resource_names: List[str] = []
+
+    campaign_resource = ""
+    ad_group_resource = ""
+    if lvl == "campaign":
+        campaign_service = client.get_service("CampaignService")
+        campaign_resource = campaign_service.campaign_path(cid, cap_id)
+        link_service = client.get_service("CampaignAssetService")
+    elif lvl == "ad_group":
+        ad_group_service = client.get_service("AdGroupService")
+        ad_group_resource = ad_group_service.ad_group_path(cid, ag_id)
+        link_service = client.get_service("AdGroupAssetService")
+        if not cap_id:
+            # Resolve campaign_id for response metadata
+            try:
+                cap_id = _ad_group_campaign_id(client, cid, ag_id)
+            except GoogleAdsHelperError:
+                cap_id = ""
+    else:
+        link_service = client.get_service("CustomerAssetService")
 
     def _link_asset(asset_rn: str, field_type: Any) -> None:
-        op = client.get_type("CampaignAssetOperation")
-        ca = op.create
-        ca.campaign = campaign_resource
-        ca.asset = asset_rn
-        ca.field_type = field_type
-        resp = campaign_asset_service.mutate_campaign_assets(customer_id=cid, operations=[op])
-        campaign_asset_resource_names.append(resp.results[0].resource_name)
+        if lvl == "campaign":
+            op = client.get_type("CampaignAssetOperation")
+            row = op.create
+            row.campaign = campaign_resource
+            row.asset = asset_rn
+            row.field_type = field_type
+            resp = link_service.mutate_campaign_assets(customer_id=cid, operations=[op])
+        elif lvl == "ad_group":
+            op = client.get_type("AdGroupAssetOperation")
+            row = op.create
+            row.ad_group = ad_group_resource
+            row.asset = asset_rn
+            row.field_type = field_type
+            resp = link_service.mutate_ad_group_assets(customer_id=cid, operations=[op])
+        else:
+            op = client.get_type("CustomerAssetOperation")
+            row = op.create
+            row.asset = asset_rn
+            row.field_type = field_type
+            resp = link_service.mutate_customer_assets(customer_id=cid, operations=[op])
+        link_resource_names.append(resp.results[0].resource_name)
 
     try:
         for spec in sitelink_specs:
@@ -2032,7 +2082,7 @@ def add_campaign_extensions(
         for text in callout_texts[:20]:
             op = client.get_type("AssetOperation")
             asset = op.create
-            asset.callout_asset.text = text[:25]
+            asset.callout_asset.callout_text = text[:25]
             resp = asset_service.mutate_assets(customer_id=cid, operations=[op])
             asset_rn = resp.results[0].resource_name
             asset_resource_names.append(asset_rn)
@@ -2051,19 +2101,23 @@ def add_campaign_extensions(
             call_added = True
     except GoogleAdsException as ex:
         raise GoogleAdsHelperError(
-            f"Google Ads API error adding campaign extensions:\n{_format_googleads_exception(ex)}"
+            f"Google Ads API error adding extensions (level={lvl}):\n{_format_googleads_exception(ex)}"
         ) from ex
     except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
         raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
 
+    link_tuple = tuple(link_resource_names)
     return AddCampaignExtensionsResult(
         customer_id=cid,
-        campaign_id=cap_id,
+        level=lvl,
+        campaign_id=cap_id if cap_id.isdigit() else "",
+        ad_group_id=ag_id if ag_id.isdigit() else "",
         sitelink_count=len(sitelink_specs),
         callout_count=len(callout_texts[:20]),
         call_added=call_added,
         asset_resource_names=tuple(asset_resource_names),
-        campaign_asset_resource_names=tuple(campaign_asset_resource_names),
+        asset_link_resource_names=link_tuple,
+        campaign_asset_resource_names=link_tuple,
     )
 
 
