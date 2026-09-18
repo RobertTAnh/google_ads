@@ -110,6 +110,31 @@ def _post(path: str, body: dict[str, Any]) -> str:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
+def _delete(path: str, params: Optional[dict[str, Any]] = None) -> str:
+    base = _base_url()
+    key = _api_key()
+    if not base or not key:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "Thiếu GOOGLE_ADS_MCP_BASE_URL hoặc MCP_API_KEY trong env của MCP server (máy local).",
+            },
+            ensure_ascii=False,
+        )
+    params = {k: v for k, v in (params or {}).items() if v is not None and str(v).strip() != ""}
+    url = f"{base}{path}"
+    try:
+        r = httpx.delete(
+            url,
+            params=params,
+            headers={"X-MCP-API-Key": key},
+            timeout=_HTTP_TIMEOUT,
+        )
+        return r.text
+    except httpx.HTTPError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
 def _period_params(
     date_range: str = "YESTERDAY",
     start_date: str = "",
@@ -308,6 +333,18 @@ def ads_campaign_budget_metrics(
 def ads_budget_alerts() -> str:
     """Danh sách CID tab Cảnh báo ngân sách: NS ngày, NS còn lại, số ngày còn (bản ghi check gần nhất trên Railway)."""
     return _get("/mcp/v1/budget_alerts")
+
+
+@mcp.tool()
+def ads_add_budget_alert(customer_id: str, mcc_id: str = "", label: str = "") -> str:
+    """Thêm CID vào danh sách theo dõi cảnh báo ngân sách trên Railway."""
+    return _post("/mcp/v1/budget_alerts", {"customer_id": customer_id, "mcc_id": mcc_id, "label": label})
+
+
+@mcp.tool()
+def ads_delete_budget_alert(customer_id: str) -> str:
+    """Xóa CID khỏi danh sách theo dõi cảnh báo ngân sách trên Railway."""
+    return _delete("/mcp/v1/budget_alerts", {"customer_id": customer_id})
 
 
 @mcp.tool()

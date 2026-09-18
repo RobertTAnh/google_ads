@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 from flask import Blueprint, jsonify, request
 
 from cid_mcc_store import lookup_mcc_for_customer
-from budget_alert_store import list_watch
+from budget_alert_store import delete_watch, list_watch, upsert_watch
 
 from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
@@ -621,6 +621,47 @@ def register_mcp_routes(
         try:
             rows = [_budget_watch_json(r) for r in list_watch(database_url, active_only=False)]
             return jsonify({"ok": True, "count": len(rows), "rows": rows})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/budget_alerts")
+    def budget_alerts_upsert():
+        """Thêm/cập nhật CID vào danh sách theo dõi cảnh báo ngân sách."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        body = request.get_json(silent=True) or {}
+        cid = normalize_customer_id(str(body.get("customer_id") or request.args.get("customer_id") or ""))
+        mcc_id = normalize_customer_id(str(body.get("mcc_id") or request.args.get("mcc_id") or ""))
+        label = str(body.get("label") or request.args.get("label") or "").strip()
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        if not mcc_id:
+            mcc_id = normalize_customer_id(lookup_mcc_for_customer(database_url, cid) or "")
+        if not mcc_id:
+            return jsonify({"ok": False, "error": "Thiếu mcc_id và chưa có map CID→MCC."}), 400
+        try:
+            upsert_watch(database_url, customer_id=cid, mcc_id=mcc_id, label=label, active=True)
+            return jsonify({"ok": True, "customer_id": cid, "mcc_id": mcc_id, "label": label})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.delete("/budget_alerts")
+    def budget_alerts_delete():
+        """Xóa CID khỏi danh sách theo dõi cảnh báo ngân sách trên Railway."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        try:
+            deleted = delete_watch(database_url, cid)
+            return jsonify({"ok": True, "deleted": bool(deleted), "customer_id": cid})
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 502
 
