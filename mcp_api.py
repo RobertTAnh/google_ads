@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 from flask import Blueprint, jsonify, request
 
 from cid_mcc_store import lookup_mcc_for_customer
+from budget_alert_store import list_watch
 
 from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
@@ -48,6 +49,7 @@ from google_ads_helper import (
     get_campaign_metrics_for_date_range,
     get_change_events_for_date_range,
     get_customer_metrics_for_date_range,
+    evaluate_budget_runway,
     get_keyword_metrics_for_date_range,
     get_keyword_quality_scores_for_date_range,
     get_pmax_search_term_insights_for_date_range,
@@ -584,6 +586,73 @@ def register_mcp_routes(
                     **_date_filter_json(df),
                     "note": "daily_budget = max(amount_micros) quan sát được trong stream kỳ (xấp xỉ budget ngày hiện tại).",
                     "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    def _micros_to_units(raw: Any) -> float | None:
+        if raw is None:
+            return None
+        return int(raw) / 1_000_000.0
+
+    def _budget_watch_json(row: dict) -> dict:
+        return {
+            "customer_id": row.get("customer_id") or "",
+            "mcc_id": row.get("mcc_id") or "",
+            "label": row.get("label") or "",
+            "active": bool(row.get("active")),
+            "daily_budget": _micros_to_units(row.get("last_total_daily_micros")) or 0.0,
+            "remaining_budget": _micros_to_units(row.get("last_remaining_micros")),
+            "days_remaining": row.get("last_days_remaining"),
+            "status": row.get("last_status") or "",
+            "last_check_at": row.get("last_check_at") or "",
+            "last_error": row.get("last_error") or "",
+        }
+
+    @bp.get("/budget_alerts")
+    def budget_alerts():
+        """Danh sách CID tab Cảnh báo ngân sách + NS ngày / NS còn / số ngày còn (bản ghi check gần nhất)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        try:
+            rows = [_budget_watch_json(r) for r in list_watch(database_url, active_only=False)]
+            return jsonify({"ok": True, "count": len(rows), "rows": rows})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/budget_runway")
+    def budget_runway():
+        """Live: tổng NS ngày ENABLED + NS tài khoản còn lại + số ngày còn (cùng công thức tab cảnh báo)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            ev = evaluate_budget_runway(client, cid)
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": ev.customer_id,
+                    "customer_name": ev.customer_name,
+                    "daily_budget": ev.total_daily_micros / 1_000_000.0,
+                    "remaining_budget": _micros_to_units(ev.remaining_micros),
+                    "days_remaining": ev.days_remaining,
+                    "status": ev.status,
+                    "should_alert": ev.should_alert,
+                    "message": ev.message,
+                    "enabled_campaign_count": ev.enabled_campaign_count,
                 }
             )
         except GoogleAdsHelperError as e:

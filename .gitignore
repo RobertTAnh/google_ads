@@ -2,6 +2,9 @@ __pycache__/
 .venv/
 *.pyc
 
+# Electron desktop app
+desktop-app/node_modules/
+
 # Secrets / credentials
 google-ads.yaml
 client_secret_*.json

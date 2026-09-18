@@ -305,6 +305,21 @@ def ads_campaign_budget_metrics(
 
 
 @mcp.tool()
+def ads_budget_alerts() -> str:
+    """Danh sách CID tab Cảnh báo ngân sách: NS ngày, NS còn lại, số ngày còn (bản ghi check gần nhất trên Railway)."""
+    return _get("/mcp/v1/budget_alerts")
+
+
+@mcp.tool()
+def ads_budget_runway(customer_id: str, mcc_id: str = "") -> str:
+    """Live ngân sách tài khoản còn lại / NS ngày ENABLED / số ngày còn — cùng công thức tab cảnh báo."""
+    p: dict[str, Any] = {"customer_id": customer_id}
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    return _get("/mcp/v1/budget_runway", p)
+
+
+@mcp.tool()
 def ads_get_ad_performance(
     customer_id: str,
     mcc_id: str = "",
