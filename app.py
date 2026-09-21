@@ -27,6 +27,7 @@ from google_ads_helper import (
     BudgetRunwayEvaluation,
     build_google_ads_client_for_mcc_id,
     create_performance_max_campaign_for_local_leads,
+    dismiss_all_recommendations,
     evaluate_budget_runway,
     format_vnd_thousands,
     get_yesterday_campaign_performance,
@@ -56,6 +57,11 @@ from budget_alert_store import (
     update_watch_label_if_empty,
     upsert_watch,
 )
+from rec_dismiss_store import (
+    init_recommendation_auto_dismiss_table,
+    list_auto_dismiss,
+    update_auto_dismiss_run,
+)
 from slack_notifier import resolve_account_display_name, send_budget_alert, send_slack_test_message
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
@@ -70,6 +76,10 @@ _BUDGET_ALERT_START_LOCK = threading.Lock()
 _BUDGET_ALERT_LEADER_LOCK_ID = 8104202603
 _DEFAULT_BUDGET_ALERT_HOURS = (11, 15, 21, 23)
 _last_budget_alert_slot_key: Optional[str] = None
+_REC_DISMISS_SCHEDULER_STARTED = False
+_REC_DISMISS_START_LOCK = threading.Lock()
+_REC_DISMISS_LEADER_LOCK_ID = 8104202604
+_DEFAULT_REC_DISMISS_HOUR = 7
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -452,6 +462,21 @@ def _acquire_budget_alert_leader(database_url: str) -> Optional[psycopg.Connecti
         return None
 
 
+def _acquire_rec_dismiss_leader(database_url: str) -> Optional[psycopg.Connection]:
+    conn = psycopg.connect(database_url, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (_REC_DISMISS_LEADER_LOCK_ID,))
+            ok = bool(cur.fetchone()[0])
+        if ok:
+            return conn
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
+
+
 def _budget_alert_timezone() -> str:
     return (os.getenv("BUDGET_ALERT_TIMEZONE") or "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
 
@@ -675,6 +700,180 @@ def _maybe_start_budget_alert_scheduler(
                         pass
 
     th = threading.Thread(target=_runner, daemon=True, name="budget-alert-scheduler")
+    th.start()
+
+
+def _rec_dismiss_timezone() -> str:
+    return (
+        os.getenv("RECOMMENDATION_DISMISS_TIMEZONE") or _budget_alert_timezone()
+    ).strip() or "Asia/Ho_Chi_Minh"
+
+
+def _parse_rec_dismiss_hour() -> int:
+    raw = (os.getenv("RECOMMENDATION_DISMISS_HOUR") or str(_DEFAULT_REC_DISMISS_HOUR)).strip()
+    try:
+        hour = int(raw)
+    except ValueError:
+        return _DEFAULT_REC_DISMISS_HOUR
+    if 0 <= hour <= 23:
+        return hour
+    return _DEFAULT_REC_DISMISS_HOUR
+
+
+def _next_rec_dismiss_wait(database_url: str, tz_name: Optional[str] = None) -> tuple[float, datetime, bool]:
+    """Số giây tới lần quét, thời điểm slot, và có cần chạy catch-up hôm nay không."""
+    tz = _safe_tz(tz_name or _rec_dismiss_timezone())
+    now = datetime.now(tz)
+    hour = _parse_rec_dismiss_hour()
+    today_slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    day_key = now.date().isoformat()
+    if now >= today_slot:
+        watches = list_auto_dismiss(database_url, active_only=True)
+        pending = any(str(w.get("last_run_date") or "") != day_key for w in watches)
+        if pending:
+            return 15.0, today_slot, True
+        tomorrow = today_slot + timedelta(days=1)
+        wait = max(1.0, (tomorrow - now).total_seconds())
+        return min(wait, 1800.0), tomorrow, False
+    return max(1.0, (today_slot - now).total_seconds()), today_slot, False
+
+
+def _run_rec_dismiss_for_watch(
+    database_url: str,
+    watch: dict,
+    *,
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    day_key: str,
+) -> None:
+    cid = _normalize_customer_id(str(watch.get("customer_id", "")))
+    mcc = _normalize_customer_id(str(watch.get("mcc_id", "")))
+    if not mcc:
+        mcc = _normalize_customer_id(lookup_mcc_for_customer(database_url, cid) or "")
+    if not mcc:
+        update_auto_dismiss_run(
+            database_url,
+            customer_id=cid,
+            last_status="error",
+            last_run_date=day_key,
+            last_error="Chưa có MCC — thêm mcc_id hoặc map CID→MCC.",
+        )
+        raise GoogleAdsHelperError("Chưa có MCC cho CID này.")
+
+    client = build_google_ads_client_for_mcc(mcc)
+    result = dismiss_all_recommendations(client, cid, partial_failure=True)
+    update_auto_dismiss_run(
+        database_url,
+        customer_id=cid,
+        last_status="ok",
+        last_run_date=day_key,
+        last_error="",
+        last_dismissed_count=int(result.dismissed_count or 0),
+    )
+
+
+def _maybe_start_rec_dismiss_scheduler(
+    database_url: Optional[str],
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+) -> None:
+    global _REC_DISMISS_SCHEDULER_STARTED
+    if not database_url:
+        return
+    raw = (os.getenv("RECOMMENDATION_DISMISS_SCHEDULER_ENABLED") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    with _REC_DISMISS_START_LOCK:
+        if _REC_DISMISS_SCHEDULER_STARTED:
+            return
+        _REC_DISMISS_SCHEDULER_STARTED = True
+
+    log = logging.getLogger(__name__)
+
+    def _runner() -> None:
+        tz_name = _rec_dismiss_timezone()
+        while True:
+            try:
+                wait_sec, slot_dt, catch_up = _next_rec_dismiss_wait(database_url, tz_name)
+            except Exception:
+                log.exception("Recommendation dismiss scheduler: lỗi tính slot")
+                time.sleep(60)
+                continue
+            log.info(
+                "Recommendation dismiss scheduler: chờ %.0fs tới %s (%s)%s",
+                wait_sec,
+                slot_dt.isoformat(),
+                tz_name,
+                " catch-up" if catch_up else "",
+            )
+            time.sleep(wait_sec)
+            leader_conn: Optional[psycopg.Connection] = None
+            try:
+                leader_conn = _acquire_rec_dismiss_leader(database_url)
+                if leader_conn is None:
+                    time.sleep(60)
+                    continue
+                tz = _safe_tz(tz_name)
+                now = datetime.now(tz)
+                day_key = now.date().isoformat()
+                hour = _parse_rec_dismiss_hour()
+                due_at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                if now < due_at:
+                    continue
+                watches = list_auto_dismiss(database_url, active_only=True)
+                log.info(
+                    "Recommendation dismiss scheduler: quét %s CID ngày %s",
+                    len(watches),
+                    day_key,
+                )
+                for w in watches:
+                    cid = _normalize_customer_id(str(w.get("customer_id", "")))
+                    if not cid:
+                        continue
+                    if str(w.get("last_run_date") or "") == day_key:
+                        continue
+                    try:
+                        _run_rec_dismiss_for_watch(
+                            database_url,
+                            w,
+                            build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
+                            day_key=day_key,
+                        )
+                    except GoogleAdsHelperError as ex:
+                        log.warning("Auto-dismiss recommendations %s: %s", cid, ex)
+                        update_auto_dismiss_run(
+                            database_url,
+                            customer_id=cid,
+                            last_status="error",
+                            last_run_date=day_key,
+                            last_error=str(ex),
+                        )
+                    except Exception as ex:
+                        log.exception("Auto-dismiss recommendations failed for %s", cid)
+                        update_auto_dismiss_run(
+                            database_url,
+                            customer_id=cid,
+                            last_status="error",
+                            last_run_date=day_key,
+                            last_error=str(ex),
+                        )
+                    time.sleep(2)
+            except Exception:
+                log.exception("Recommendation dismiss scheduler loop error")
+            finally:
+                if leader_conn is not None:
+                    try:
+                        with leader_conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT pg_advisory_unlock(%s)",
+                                (_REC_DISMISS_LEADER_LOCK_ID,),
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        leader_conn.close()
+                    except Exception:
+                        pass
+
+    th = threading.Thread(target=_runner, daemon=True, name="rec-dismiss-scheduler")
     th.start()
 
 
@@ -908,6 +1107,7 @@ def create_app() -> Flask:
 
             init_customer_mcc_map_table(database_url)
             init_budget_alert_watch_table(database_url)
+            init_recommendation_auto_dismiss_table(database_url)
         except Exception as ex:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
     _maybe_start_report_scheduler(report_projects_file, database_url or None)
@@ -968,6 +1168,10 @@ def create_app() -> Flask:
         database_url or None,
         _build_google_ads_client_for_mcc,
         mcc_configs,
+    )
+    _maybe_start_rec_dismiss_scheduler(
+        database_url or None,
+        _build_google_ads_client_for_mcc,
     )
 
     # Predefined client customer IDs (comma-separated) for the dashboard.

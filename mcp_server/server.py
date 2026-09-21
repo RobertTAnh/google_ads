@@ -46,7 +46,8 @@ mcp = FastMCP(
         "List ad groups: ads_list_ad_groups. "
         "Pause/đổi tên/xóa campaign: ads_update_campaign (status=REMOVED để xóa). "
         "Đổi ngân sách ngày: ads_update_campaign_budget. "
-        "Đề xuất: ads_get_recommendations; bỏ qua: ads_dismiss_recommendations."
+        "Đề xuất: ads_get_recommendations; bỏ qua: ads_dismiss_recommendations. "
+        "Quét hàng ngày dismiss đề xuất: ads_recommendation_auto_dismiss / ads_set_recommendation_auto_dismiss."
     ),
 )
 
@@ -1083,6 +1084,35 @@ def ads_get_recommendations(
     if include_dismissed:
         p["include_dismissed"] = "true"
     return _get("/mcp/v1/recommendations", p)
+
+
+@mcp.tool()
+def ads_recommendation_auto_dismiss(customer_id: str = "") -> str:
+    """Danh sách CID bật quét hàng ngày dismiss đề xuất trên Railway. Truyền customer_id để lọc 1 CID."""
+    p: dict[str, Any] = {}
+    if customer_id.strip():
+        p["customer_id"] = customer_id.strip()
+    return _get("/mcp/v1/recommendation_auto_dismiss", p)
+
+
+@mcp.tool()
+def ads_set_recommendation_auto_dismiss(
+    customer_id: str,
+    mcc_id: str = "",
+    label: str = "",
+    active: bool = True,
+) -> str:
+    """Bật/tắt quét hàng ngày: nếu tài khoản có đề xuất thì Railway tự dismiss (không cần mở app)."""
+    return _post(
+        "/mcp/v1/recommendation_auto_dismiss",
+        {"customer_id": customer_id, "mcc_id": mcc_id, "label": label, "active": active},
+    )
+
+
+@mcp.tool()
+def ads_delete_recommendation_auto_dismiss(customer_id: str) -> str:
+    """Xóa CID khỏi danh sách quét dismiss đề xuất hàng ngày."""
+    return _delete("/mcp/v1/recommendation_auto_dismiss", {"customer_id": customer_id})
 
 
 @mcp.tool()

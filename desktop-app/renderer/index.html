@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ads Manager</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="setup-screen" class="setup-screen hidden">
+      <div class="setup-card">
+        <div class="brand-mark">AM</div>
+        <h1>Kết nối Railway</h1>
+        <p>Nhập địa chỉ API và MCP key để lấy dữ liệu tài khoản quảng cáo.</p>
+        <label>
+          Địa chỉ Railway
+          <input id="setup-url" type="text" spellcheck="false" />
+        </label>
+        <label>
+          MCP API key
+          <input id="setup-key" type="password" spellcheck="false" />
+        </label>
+        <label class="check-row">
+          <input id="setup-autostart" type="checkbox" checked />
+          Khởi động cùng Windows
+        </label>
+        <div id="setup-error" class="form-error"></div>
+        <button id="setup-save" type="button">Kết nối và vào app</button>
+      </div>
+    </div>
+
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark sm">AM</div>
+          <div>
+            <strong>Ads Manager</strong>
+            <span>Tài khoản đang chạy</span>
+          </div>
+        </div>
+
+        <form id="add-form" class="add-form">
+          <label for="cid-input">Thêm tài khoản</label>
+          <div class="add-row">
+            <input
+              id="cid-input"
+              type="text"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="Nhập CID, ví dụ 123-456-7890"
+            />
+            <button id="add-btn" type="submit">Thêm</button>
+          </div>
+          <div id="add-error" class="form-error"></div>
+        </form>
+
+        <div class="account-search">
+          <input id="account-search" type="search" placeholder="Tìm tài khoản..." />
+        </div>
+        <div id="account-list" class="account-list"></div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <button id="back-overview" class="back-link hidden" type="button">← Tất cả tài khoản</button>
+            <h1 id="account-name">Tất cả tài khoản</h1>
+            <p id="account-cid" class="muted">Chỉ số kỳ đã chọn và ngân sách còn lại</p>
+          </div>
+          <div class="topbar-actions">
+            <div id="date-picker-root"></div>
+            <button id="refresh-btn" class="icon-btn" type="button" title="Tải lại">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 1 1-2.6-6.4" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            </button>
+            <button id="settings-btn" class="icon-btn" type="button" title="Cài đặt">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H8a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V8c.3.6.9 1 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"
+                />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <section id="overview" class="overview hidden">
+          <div id="overview-kpis" class="kpi-row"></div>
+          <div id="overview-status" class="table-status"></div>
+          <div class="table-wrap">
+            <table id="overview-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="empty-main" class="empty-main hidden">
+          <div class="empty-card">
+            <h2>Chưa có tài khoản</h2>
+            <p>Thêm CID ở cột trái, hoặc đợi tab cảnh báo ngân sách trên Railway có dữ liệu.</p>
+          </div>
+        </section>
+
+        <section id="account-detail" class="account-detail hidden">
+          <div id="kpi-row" class="kpi-row"></div>
+          <div class="detail-toolbar">
+            <label class="check-row auto-dismiss">
+              <input id="auto-dismiss" type="checkbox" />
+              Quét hàng ngày: có đề xuất thì tự bỏ qua
+            </label>
+            <span id="dismiss-status" class="muted"></span>
+          </div>
+          <div class="tabs-row">
+            <nav id="tabs" class="tabs">
+              <button type="button" class="tab active" data-tab="campaigns">Chiến dịch</button>
+              <button type="button" class="tab" data-tab="adgroups">Nhóm quảng cáo</button>
+              <button type="button" class="tab" data-tab="keywords">Từ khóa</button>
+              <button type="button" class="tab" data-tab="budget">Ngân sách</button>
+            </nav>
+            <input id="table-search" type="search" placeholder="Lọc trong bảng..." />
+          </div>
+          <div id="table-status" class="table-status"></div>
+          <div class="table-wrap">
+            <table id="data-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card">
+        <h2>Cài đặt</h2>
+        <label>
+          Địa chỉ Railway
+          <input id="settings-url" type="text" spellcheck="false" />
+        </label>
+        <label>
+          MCP API key
+          <input id="settings-key" type="password" spellcheck="false" />
+        </label>
+        <label class="check-row">
+          <input id="settings-autostart" type="checkbox" />
+          Khởi động cùng Windows
+        </label>
+        <div id="settings-status" class="form-error"></div>
+        <div class="modal-actions">
+          <button id="settings-test" class="ghost" type="button">Kiểm tra kết nối</button>
+          <button id="settings-cancel" class="ghost" type="button">Đóng</button>
+          <button id="settings-save" type="button">Lưu</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="./date-picker.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

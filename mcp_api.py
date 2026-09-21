@@ -16,6 +16,12 @@ from flask import Blueprint, jsonify, request
 
 from cid_mcc_store import lookup_mcc_for_customer
 from budget_alert_store import delete_watch, list_watch, upsert_watch
+from rec_dismiss_store import (
+    delete_auto_dismiss,
+    get_auto_dismiss,
+    list_auto_dismiss,
+    upsert_auto_dismiss,
+)
 
 from google_ads_helper import (
     ALLOWED_MCP_DATE_RANGES,
@@ -700,6 +706,94 @@ def register_mcp_routes(
                 }
             )
         except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    def _rec_auto_dismiss_json(row: dict) -> dict:
+        return {
+            "customer_id": row.get("customer_id") or "",
+            "label": row.get("label") or "",
+            "mcc_id": row.get("mcc_id") or "",
+            "active": bool(row.get("active")),
+            "last_run_at": row.get("last_run_at") or "",
+            "last_run_date": row.get("last_run_date") or "",
+            "last_status": row.get("last_status") or "",
+            "last_error": row.get("last_error") or "",
+            "last_dismissed_count": int(row.get("last_dismissed_count") or 0),
+        }
+
+    @bp.get("/recommendation_auto_dismiss")
+    def recommendation_auto_dismiss_list():
+        """Danh sách CID bật quét hàng ngày: dismiss đề xuất nếu có."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        cid = normalize_customer_id(request.args.get("customer_id", "") or "")
+        try:
+            if cid:
+                row = get_auto_dismiss(database_url, cid)
+                rows = [_rec_auto_dismiss_json(row)] if row else []
+            else:
+                rows = [_rec_auto_dismiss_json(r) for r in list_auto_dismiss(database_url, active_only=False)]
+            return jsonify({"ok": True, "count": len(rows), "rows": rows})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/recommendation_auto_dismiss")
+    def recommendation_auto_dismiss_upsert():
+        """Bật/tắt quét hàng ngày dismiss đề xuất cho CID (chạy trên Railway, không phụ thuộc mở app)."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        body = request.get_json(silent=True) or {}
+        cid = normalize_customer_id(str(body.get("customer_id") or request.args.get("customer_id") or ""))
+        mcc_id = normalize_customer_id(str(body.get("mcc_id") or request.args.get("mcc_id") or ""))
+        label = str(body.get("label") or request.args.get("label") or "").strip()
+        active_raw = body.get("active", True)
+        if isinstance(active_raw, bool):
+            active = active_raw
+        else:
+            active = str(active_raw or "").strip().lower() in ("1", "true", "yes", "on", "")
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        if not mcc_id:
+            mcc_id = normalize_customer_id(lookup_mcc_for_customer(database_url, cid) or "")
+        existing = get_auto_dismiss(database_url, cid)
+        if not mcc_id:
+            mcc_id = normalize_customer_id((existing or {}).get("mcc_id") or "")
+        if not mcc_id and active:
+            return jsonify({"ok": False, "error": "Thiếu mcc_id và chưa có map CID→MCC."}), 400
+        try:
+            upsert_auto_dismiss(
+                database_url,
+                customer_id=cid,
+                mcc_id=mcc_id or "",
+                label=label,
+                active=active,
+            )
+            row = get_auto_dismiss(database_url, cid)
+            return jsonify({"ok": True, "row": _rec_auto_dismiss_json(row) if row else {"customer_id": cid, "active": active}})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.delete("/recommendation_auto_dismiss")
+    def recommendation_auto_dismiss_delete():
+        """Xóa CID khỏi danh sách quét dismiss đề xuất hàng ngày."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        try:
+            deleted = delete_auto_dismiss(database_url, cid)
+            return jsonify({"ok": True, "deleted": bool(deleted), "customer_id": cid})
+        except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 502
 
     @bp.get("/negative_keywords")

@@ -1,0 +1,16 @@
+{
+  "name": "ads-manager",
+  "productName": "Ads Manager",
+  "version": "1.0.0",
+  "description": "Desktop app quản lý tài khoản Google Ads, lấy dữ liệu từ Railway",
+  "main": "electron/main.js",
+  "author": "Fago",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^37.3.1"
+  }
+}
