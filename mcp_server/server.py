@@ -45,7 +45,8 @@ mcp = FastMCP(
         "Đọc copy RSA: ads_get_responsive_search_ads. "
         "List ad groups: ads_list_ad_groups. "
         "Pause/đổi tên/xóa campaign: ads_update_campaign (status=REMOVED để xóa). "
-        "Đổi ngân sách ngày: ads_update_campaign_budget."
+        "Đổi ngân sách ngày: ads_update_campaign_budget. "
+        "Đề xuất: ads_get_recommendations; bỏ qua: ads_dismiss_recommendations."
     ),
 )
 
@@ -1058,6 +1059,69 @@ def ads_get_change_history(
         "/mcp/v1/change_history",
         _customer_params(customer_id, mcc_id, date_range=date_range, start_date=start_date, end_date=end_date),
     )
+
+
+@mcp.tool()
+def ads_get_recommendations(
+    customer_id: str,
+    mcc_id: str = "",
+    campaign_id: str = "",
+    recommendation_type: str = "",
+    include_dismissed: bool = False,
+) -> str:
+    """
+    Liệt kê đề xuất (tab Đề xuất). Trả resource_name / recommendation_id để dismiss.
+    recommendation_type: tùy chọn, vd KEYWORD, CAMPAIGN_BUDGET (CSV nhiều type được).
+    """
+    p: dict[str, Any] = {"customer_id": customer_id}
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    if recommendation_type.strip():
+        p["recommendation_type"] = recommendation_type.strip()
+    if include_dismissed:
+        p["include_dismissed"] = "true"
+    return _get("/mcp/v1/recommendations", p)
+
+
+@mcp.tool()
+def ads_dismiss_recommendations(
+    customer_id: str,
+    resource_names_json: str = "",
+    mcc_id: str = "",
+    resource_name: str = "",
+    payload_json: str = "",
+) -> str:
+    """
+    Bỏ qua (dismiss) đề xuất — không áp dụng thay đổi.
+    resource_names_json: [\"customers/.../recommendations/123\", ...] hoặc [\"123\", ...]
+    Hoặc một resource_name / recommendation_id. Lấy id từ ads_get_recommendations.
+    """
+    if payload_json.strip():
+        try:
+            body = json.loads(payload_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"ok": False, "error": f"payload_json không hợp lệ: {e}"}, ensure_ascii=False)
+        if not isinstance(body, dict):
+            return json.dumps({"ok": False, "error": "payload_json phải là object."}, ensure_ascii=False)
+    else:
+        body = {"customer_id": customer_id}
+        if mcc_id.strip():
+            body["mcc_id"] = mcc_id.strip()
+        if resource_names_json.strip():
+            try:
+                body["resource_names"] = json.loads(resource_names_json)
+            except json.JSONDecodeError as e:
+                return json.dumps(
+                    {"ok": False, "error": f"resource_names_json không hợp lệ: {e}"},
+                    ensure_ascii=False,
+                )
+        if resource_name.strip():
+            body["resource_name"] = resource_name.strip()
+    if "customer_id" not in body:
+        body["customer_id"] = customer_id
+    return _post("/mcp/v1/dismiss_recommendations", body)
 
 
 def main() -> None:

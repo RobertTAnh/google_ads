@@ -432,6 +432,26 @@ class UpdateCampaignBudgetResult:
 
 
 @dataclass(frozen=True)
+class RecommendationRow:
+    """Một đề xuất Google Ads (tab Đề xuất)."""
+
+    customer_id: str
+    resource_name: str
+    recommendation_id: str
+    type: str
+    campaign_id: str
+    ad_group_id: str
+    dismissed: bool
+
+
+@dataclass(frozen=True)
+class DismissRecommendationsResult:
+    customer_id: str
+    dismissed_count: int
+    resource_names: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -2922,6 +2942,158 @@ def update_campaign_budget(
         budget_resource_name=budget_rn,
         old_daily_budget=old_amount,
         new_daily_budget=float(daily_budget),
+    )
+
+
+def list_recommendations_for_customer(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_id: Optional[str] = None,
+    recommendation_type: Optional[str] = None,
+    include_dismissed: bool = False,
+) -> List[RecommendationRow]:
+    """
+    Liệt kê đề xuất (Recommendations) hiện có trên tài khoản.
+    resource_name dùng cho ads_dismiss_recommendations.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    where_parts: List[str] = []
+    if not include_dismissed:
+        where_parts.append("recommendation.dismissed = FALSE")
+
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if cap_id:
+        if not cap_id.isdigit():
+            raise GoogleAdsHelperError("campaign_id không hợp lệ.")
+        where_parts.append(f"campaign.id = {cap_id}")
+
+    type_raw = (recommendation_type or "").strip().upper()
+    if type_raw:
+        # Cho phép CSV hoặc một type
+        types = [p.strip().upper() for p in type_raw.split(",") if p.strip()]
+        if len(types) == 1:
+            where_parts.append(f"recommendation.type = {types[0]}")
+        elif types:
+            where_parts.append("recommendation.type IN (" + ", ".join(types) + ")")
+
+    where_sql = ("\n        WHERE " + "\n          AND ".join(where_parts)) if where_parts else ""
+
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT
+          customer.id,
+          recommendation.resource_name,
+          recommendation.type,
+          recommendation.campaign,
+          recommendation.ad_group,
+          recommendation.dismissed
+        FROM recommendation
+        {where_sql}
+    """.strip()
+
+    rows: List[RecommendationRow] = []
+    try:
+        stream = ga_service.search_stream(customer_id=cid, query=query)
+        for batch in stream:
+            for r in batch.results:
+                rec = r.recommendation
+                rn = str(rec.resource_name or "")
+                camp_rn = str(getattr(rec, "campaign", "") or "")
+                ag_rn = str(getattr(rec, "ad_group", "") or "")
+                rows.append(
+                    RecommendationRow(
+                        customer_id=str(r.customer.id),
+                        resource_name=rn,
+                        recommendation_id=_resource_tail_id(rn),
+                        type=_proto_enum_name(getattr(rec, "type_", None)),
+                        campaign_id=_resource_tail_id(camp_rn) if camp_rn else "",
+                        ad_group_id=_resource_tail_id(ag_rn) if ag_rn else "",
+                        dismissed=bool(getattr(rec, "dismissed", False)),
+                    )
+                )
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error listing recommendations for {cid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    rows.sort(key=lambda x: (x.type, x.campaign_id, x.recommendation_id))
+    return rows
+
+
+def dismiss_recommendations(
+    client: GoogleAdsClient,
+    customer_id: str,
+    resource_names: Iterable[str],
+    *,
+    partial_failure: bool = True,
+) -> DismissRecommendationsResult:
+    """
+    Bỏ qua (dismiss) một hoặc nhiều đề xuất.
+    Truyền resource_name đầy đủ (customers/.../recommendations/...) hoặc chỉ recommendation_id.
+    Tối đa 100 thao tác / request (API limit) — hàm tự chia batch.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    recommendation_service = client.get_service("RecommendationService")
+    resolved: List[str] = []
+    seen: set[str] = set()
+    for raw in resource_names:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if s.startswith("customers/"):
+            rn = s
+        else:
+            rid = "".join(ch for ch in s if ch.isdigit())
+            if not rid:
+                raise GoogleAdsHelperError(f"recommendation resource_name/id không hợp lệ: {raw!r}")
+            rn = recommendation_service.recommendation_path(cid, rid)
+        if rn not in seen:
+            seen.add(rn)
+            resolved.append(rn)
+
+    if not resolved:
+        raise GoogleAdsHelperError("Cần ít nhất một recommendation resource_name hoặc id.")
+
+    dismissed: List[str] = []
+    try:
+        for i in range(0, len(resolved), 100):
+            chunk = resolved[i : i + 100]
+            request = client.get_type("DismissRecommendationRequest")
+            request.customer_id = cid
+            request.partial_failure = bool(partial_failure)
+            for rn in chunk:
+                if hasattr(request, "DismissRecommendationOperation"):
+                    op = request.DismissRecommendationOperation()
+                    op.resource_name = rn
+                    request.operations.append(op)
+                else:
+                    op = request.operations.add()
+                    op.resource_name = rn
+            response = recommendation_service.dismiss_recommendation(request=request)
+            for result in response.results:
+                rn_out = str(getattr(result, "resource_name", "") or "")
+                if rn_out:
+                    dismissed.append(rn_out)
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error dismissing recommendations:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    return DismissRecommendationsResult(
+        customer_id=cid,
+        dismissed_count=len(dismissed),
+        resource_names=tuple(dismissed),
     )
 
 

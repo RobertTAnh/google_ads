@@ -68,6 +68,8 @@ Query thường dùng:
 | Asset (asset group) + metrics kỳ | GET | `/mcp/v1/asset_performance` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` |
 | Lịch sử thay đổi (change_event) | GET | `/mcp/v1/change_history` | `customer_id`, `mcc_id?`, `date_range?` hoặc `start_date`+`end_date` (Google: ~30 ngày, GAQL LIMIT 10000) |
 | **Auction Insights (Search)** | GET | `/mcp/v1/auction_insights` | `customer_id`, `mcc_id?`, `campaign_id?`, `date_range?` hoặc `start_date`+`end_date` |
+| **Đề xuất (Recommendations)** | GET | `/mcp/v1/recommendations` | `customer_id`, `mcc_id?`, `campaign_id?`, `recommendation_type?`, `include_dismissed?` |
+| **Bỏ qua đề xuất** (mutate) | POST | `/mcp/v1/dismiss_recommendations` | JSON: `customer_id`, `resource_names` `[]` hoặc `resource_name` / `recommendation_id`, `mcc_id?` |
 | Tra MCC theo CID (chỉ map DB / ?mcc_id=) | GET | `/mcp/v1/resolve_mcc` | `customer_id`, `mcc_id?` |
 
 `customer_id` / `mcc_id`: **10 chữ số** (có thể gõ dạng `123-456-7890`).

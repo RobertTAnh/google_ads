@@ -40,6 +40,8 @@ from google_ads_helper import (
     update_campaign_budget,
     list_responsive_search_ads,
     list_ad_groups_for_customer,
+    list_recommendations_for_customer,
+    dismiss_recommendations,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -2003,6 +2005,123 @@ def register_mcp_routes(
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
                     "note": "Số tiền theo đơn vị tiền tệ tài khoản (vd VND).",
+                    "result": asdict(result),
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/recommendations")
+    def recommendations():
+        """Liệt kê đề xuất (Đề xuất / Recommendations) trên tài khoản."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+
+        recommendation_type = str(request.args.get("recommendation_type", "") or "").strip() or None
+        include_raw = request.args.get("include_dismissed", False)
+        if isinstance(include_raw, bool):
+            include_dismissed = include_raw
+        else:
+            include_dismissed = str(include_raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            rows = list_recommendations_for_customer(
+                client,
+                cid,
+                campaign_id=campaign_id,
+                recommendation_type=recommendation_type,
+                include_dismissed=include_dismissed,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "resource_name / recommendation_id dùng cho POST /dismiss_recommendations.",
+                    "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/dismiss_recommendations")
+    def dismiss_recommendations_route():
+        """Bỏ qua (dismiss) đề xuất Google Ads."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+
+        body = request.get_json(silent=True) if request.is_json else {}
+        body = body if isinstance(body, dict) else {}
+
+        resolved = _resolve_customer_mcc_from_request(body)
+        if resolved[0] is None:
+            return resolved[2]
+        cid, mcc_id, mcc_resolved_via = resolved
+
+        resource_names: list[str] = []
+        raw_list = body.get("resource_names", body.get("recommendations", body.get("recommendation_ids")))
+        if isinstance(raw_list, list):
+            for item in raw_list:
+                if isinstance(item, dict):
+                    rn = str(item.get("resource_name", "") or item.get("recommendation_id", "") or "").strip()
+                else:
+                    rn = str(item or "").strip()
+                if rn:
+                    resource_names.append(rn)
+        elif isinstance(raw_list, str) and raw_list.strip():
+            resource_names = [p.strip() for p in raw_list.split(",") if p.strip()]
+
+        single = str(body.get("resource_name", "") or body.get("recommendation_id", "") or "").strip()
+        if single:
+            resource_names.append(single)
+
+        if not resource_names:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "Cần resource_names (mảng) hoặc resource_name / recommendation_id. Lấy từ GET /recommendations.",
+                }
+            ), 400
+
+        partial_raw = body.get("partial_failure", True)
+        if isinstance(partial_raw, bool):
+            partial_failure = partial_raw
+        else:
+            partial_failure = str(partial_raw or "").strip().lower() in ("1", "true", "yes", "on", "")
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = dismiss_recommendations(
+                client,
+                cid,
+                resource_names,
+                partial_failure=partial_failure,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": "Đã bỏ qua đề xuất (dismiss). Không áp dụng thay đổi quảng cáo.",
                     "result": asdict(result),
                 }
             )
