@@ -42,6 +42,7 @@ from google_ads_helper import (
     list_ad_groups_for_customer,
     list_recommendations_for_customer,
     dismiss_recommendations,
+    dismiss_all_recommendations,
     get_ad_group_metrics_for_date_range,
     get_auction_insights_for_campaigns,
     get_ad_performance_for_date_range,
@@ -2093,11 +2094,17 @@ def register_mcp_routes(
         if single:
             resource_names.append(single)
 
-        if not resource_names:
+        dismiss_all_raw = body.get("dismiss_all", False)
+        if isinstance(dismiss_all_raw, bool):
+            dismiss_all = dismiss_all_raw
+        else:
+            dismiss_all = str(dismiss_all_raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        if not resource_names and not dismiss_all:
             return jsonify(
                 {
                     "ok": False,
-                    "error": "Cần resource_names (mảng) hoặc resource_name / recommendation_id. Lấy từ GET /recommendations.",
+                    "error": "Cần resource_names (mảng), resource_name / recommendation_id, hoặc dismiss_all=true. Lấy từ GET /recommendations.",
                 }
             ), 400
 
@@ -2109,18 +2116,22 @@ def register_mcp_routes(
 
         try:
             client = build_google_ads_client_for_mcc(mcc_id)
-            result = dismiss_recommendations(
-                client,
-                cid,
-                resource_names,
-                partial_failure=partial_failure,
-            )
+            if dismiss_all:
+                result = dismiss_all_recommendations(client, cid, partial_failure=partial_failure)
+            else:
+                result = dismiss_recommendations(
+                    client,
+                    cid,
+                    resource_names,
+                    partial_failure=partial_failure,
+                )
             return jsonify(
                 {
                     "ok": True,
                     "mcc_customer_id": mcc_id,
                     "mcc_resolved_via": mcc_resolved_via,
                     "customer_id": cid,
+                    "dismiss_all": dismiss_all,
                     "note": "Đã bỏ qua đề xuất (dismiss). Không áp dụng thay đổi quảng cáo.",
                     "result": asdict(result),
                 }

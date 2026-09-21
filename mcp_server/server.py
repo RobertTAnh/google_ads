@@ -1092,11 +1092,13 @@ def ads_dismiss_recommendations(
     mcc_id: str = "",
     resource_name: str = "",
     payload_json: str = "",
+    dismiss_all: bool = False,
 ) -> str:
     """
     Bỏ qua (dismiss) đề xuất — không áp dụng thay đổi.
     resource_names_json: [\"customers/.../recommendations/123\", ...] hoặc [\"123\", ...]
     Hoặc một resource_name / recommendation_id. Lấy id từ ads_get_recommendations.
+    dismiss_all=true: bỏ qua tất cả đề xuất đang mở trên tài khoản.
     """
     if payload_json.strip():
         try:
@@ -1119,8 +1121,12 @@ def ads_dismiss_recommendations(
                 )
         if resource_name.strip():
             body["resource_name"] = resource_name.strip()
+        if dismiss_all:
+            body["dismiss_all"] = True
     if "customer_id" not in body:
         body["customer_id"] = customer_id
+    if dismiss_all:
+        body["dismiss_all"] = True
     return _post("/mcp/v1/dismiss_recommendations", body)
 
 

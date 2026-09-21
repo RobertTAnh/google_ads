@@ -3097,6 +3097,21 @@ def dismiss_recommendations(
     )
 
 
+def dismiss_all_recommendations(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    partial_failure: bool = True,
+) -> DismissRecommendationsResult:
+    """Lấy mọi đề xuất chưa dismiss rồi bỏ qua hết."""
+    cid = normalize_google_ads_customer_id(customer_id)
+    rows = list_recommendations_for_customer(client, cid, include_dismissed=False)
+    names = [r.resource_name for r in rows if r.resource_name and not r.dismissed]
+    if not names:
+        return DismissRecommendationsResult(customer_id=cid, dismissed_count=0, resource_names=())
+    return dismiss_recommendations(client, cid, names, partial_failure=partial_failure)
+
+
 def update_keyword_bids(
     client: GoogleAdsClient,
     customer_id: str,
