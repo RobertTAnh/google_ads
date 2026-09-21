@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 import psycopg
+from psycopg.errors import DuplicateObject, DuplicateTable, UniqueViolation
 
 
 def init_recommendation_auto_dismiss_table(database_url: str) -> None:
@@ -29,7 +30,16 @@ def init_recommendation_auto_dismiss_table(database_url: str) -> None:
     """
     with psycopg.connect(database_url, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute(ddl)
+            try:
+                cur.execute(ddl)
+            except (DuplicateTable, DuplicateObject, UniqueViolation):
+                # Hai worker gunicorn có thể CREATE TABLE cùng lúc lúc deploy.
+                return
+            except Exception as ex:
+                msg = str(ex).lower()
+                if "already exists" in msg or "duplicate key" in msg:
+                    return
+                raise
 
 
 def _row_to_dict(row: tuple) -> dict:
