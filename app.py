@@ -66,6 +66,7 @@ from slack_notifier import resolve_account_display_name, send_budget_alert, send
 
 _ACCOUNT_CACHE_BY_MCC: dict[str, dict] = {}
 _REPORT_PROJECTS_LOCK = threading.Lock()
+_REPORT_SCHEDULER_WAKE = threading.Event()
 _REPORT_SCHEDULER_STARTED = False
 _REPORT_SCHEDULER_START_LOCK = threading.Lock()
 _CID_SYNC_SCHEDULER_STARTED = False
@@ -412,6 +413,32 @@ def _effective_schedule_time(
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def _seconds_until_next_report_due(projects: List[dict], now_utc: datetime, *, max_wait: float) -> float:
+    """
+    Serverless Postgres (Neon) chỉ ngủ khi không có query ~5 phút, nên scheduler
+    phải ngủ tới mốc chạy kế tiếp thay vì poll DB liên tục.
+    Mốc 06:00 được giãn thêm vài phút/project; thức sớm hơn là an toàn vì vòng lặp tính lại.
+    """
+    wait = max_wait
+    for p in projects:
+        if not p.get("active", True):
+            continue
+        base = str(p.get("schedule_time", "06:00") or "06:00").strip()
+        if not re.match(r"^\d{2}:\d{2}$", base):
+            base = "06:00"
+        hh, mm = [int(x) for x in base.split(":")]
+        now_local = now_utc.astimezone(_safe_tz(str(p.get("time_zone", "Asia/Ho_Chi_Minh"))))
+        due_at = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if str(p.get("last_run_date", "")) == now_local.date().isoformat():
+            due_at += timedelta(days=1)
+        elif now_local >= due_at:
+            # Đang chờ tới phút được giãn (06:00 + n) của project này.
+            wait = min(wait, 60.0)
+            continue
+        wait = min(wait, (due_at - now_local).total_seconds())
+    return max(5.0, wait)
+
+
 def _acquire_scheduler_leader(database_url: str) -> Optional[psycopg.Connection]:
     """
     Acquire cross-instance scheduler lock in Postgres.
@@ -734,7 +761,7 @@ def _next_rec_dismiss_wait(database_url: str, tz_name: Optional[str] = None) -> 
             return 15.0, today_slot, True
         tomorrow = today_slot + timedelta(days=1)
         wait = max(1.0, (tomorrow - now).total_seconds())
-        return min(wait, 1800.0), tomorrow, False
+        return min(wait, 10800.0), tomorrow, False
     return max(1.0, (today_slot - now).total_seconds()), today_slot, False
 
 
@@ -892,14 +919,16 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
 
     def _runner() -> None:
         throttle_seconds = int((os.getenv("REPORT_JOB_THROTTLE_SECONDS") or "8").strip() or 8)
+        max_wait = float(max(60, int((os.getenv("REPORT_SCHEDULER_MAX_SLEEP_SECONDS") or "10800").strip() or 10800)))
         while True:
             leader_conn: Optional[psycopg.Connection] = None
+            wait_sec = 60.0
             try:
                 # In production (Railway), only ONE instance should process schedules.
                 if database_url:
                     leader_conn = _acquire_scheduler_leader(database_url)
                     if leader_conn is None:
-                        time.sleep(10)
+                        time.sleep(60)
                         continue
 
                 with _REPORT_PROJECTS_LOCK:
@@ -980,6 +1009,11 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                 if changed:
                     with _REPORT_PROJECTS_LOCK:
                         _save_report_projects(path, projects, database_url)
+                wait_sec = _seconds_until_next_report_due(
+                    projects,
+                    datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")),
+                    max_wait=max_wait,
+                )
             except Exception:
                 # Keep scheduler alive regardless of one-loop errors.
                 pass
@@ -995,7 +1029,8 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
                     except Exception:
                         pass
 
-            time.sleep(30)
+            _REPORT_SCHEDULER_WAKE.wait(wait_sec)
+            _REPORT_SCHEDULER_WAKE.clear()
 
     th = threading.Thread(target=_runner, daemon=True, name="report-scheduler")
     th.start()
@@ -1487,6 +1522,7 @@ def create_app() -> Flask:
             projects = _load_report_projects(report_projects_file, database_url or None)
             projects.append(item)
             _save_report_projects(report_projects_file, projects, database_url or None)
+        _REPORT_SCHEDULER_WAKE.set()
         flash("Đã tạo project báo cáo tự động.", "success")
         return redirect(url_for("report_projects"))
 
@@ -1526,6 +1562,7 @@ def create_app() -> Flask:
                 break
             if updated:
                 _save_report_projects(report_projects_file, projects, database_url or None)
+        _REPORT_SCHEDULER_WAKE.set()
 
         if updated:
             flash("Đã cập nhật project.", "success")
@@ -1542,6 +1579,7 @@ def create_app() -> Flask:
                     p["active"] = not bool(p.get("active", True))
                     break
             _save_report_projects(report_projects_file, projects, database_url or None)
+        _REPORT_SCHEDULER_WAKE.set()
         flash("Đã cập nhật trạng thái project.", "info")
         return redirect(url_for("report_projects"))
 
@@ -1554,6 +1592,7 @@ def create_app() -> Flask:
             deleted = len(kept) != len(projects)
             if deleted:
                 _save_report_projects(report_projects_file, kept, database_url or None)
+        _REPORT_SCHEDULER_WAKE.set()
         if deleted:
             flash("Đã xóa project.", "success")
         else:
