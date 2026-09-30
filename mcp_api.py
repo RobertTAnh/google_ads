@@ -143,6 +143,7 @@ def register_mcp_routes(
     normalize_customer_id: Callable[[str], str],
     default_mcc_id: str,
     database_url: Optional[str] = None,
+    run_cid_sync: Optional[Callable[[], dict]] = None,
 ) -> None:
     bp = Blueprint("mcp", __name__, url_prefix="/mcp/v1")
 
@@ -2232,5 +2233,24 @@ def register_mcp_routes(
             )
         except GoogleAdsHelperError as e:
             return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.post("/cid_mcc_sync")
+    def cid_mcc_sync_route():
+        """Đồng bộ ngay map CID→MCC từ danh sách tài khoản con của từng MCC đã cấu hình."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        if run_cid_sync is None:
+            return jsonify({"ok": False, "error": "Server chưa bật đồng bộ CID↔MCC."}), 503
+        try:
+            result = run_cid_sync()
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+        if result.get("busy"):
+            return jsonify(result), 409
+        if not result.get("results") and result.get("error"):
+            return jsonify(result), 503
+        # Lỗi từng MCC nằm trong results; vẫn trả 200 để app hiển thị chi tiết.
+        return jsonify({**result, "ok": True, "all_ok": bool(result.get("ok"))})
 
     app.register_blueprint(bp)

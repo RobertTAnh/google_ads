@@ -173,6 +173,10 @@ ipcMain.handle("test-connection", async () => {
   return railway.ping(state);
 });
 
+ipcMain.handle("sync-cid-mcc", async () => {
+  return railway.syncCidMcc(state);
+});
+
 ipcMain.handle("add-account", async (_event, rawCid) => {
   const customerId = railway.normalizeCid(rawCid);
   if (customerId.length !== 10) {

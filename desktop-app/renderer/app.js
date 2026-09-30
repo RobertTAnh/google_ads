@@ -38,6 +38,7 @@ const els = {
   settingsAutostart: document.getElementById("settings-autostart"),
   settingsStatus: document.getElementById("settings-status"),
   settingsTest: document.getElementById("settings-test"),
+  settingsSyncCid: document.getElementById("settings-sync-cid"),
   settingsCancel: document.getElementById("settings-cancel"),
   settingsSave: document.getElementById("settings-save"),
   toast: document.getElementById("toast"),
@@ -99,15 +100,20 @@ function formatDays(value) {
   return `${formatNumber(value, 1)} ngày`;
 }
 
+const LOW_RUNWAY_DAYS = 4;
+
+function isLowDays(value) {
+  return value != null && !Number.isNaN(Number(value)) && Number(value) < LOW_RUNWAY_DAYS;
+}
+
 function daysTone(value) {
   if (value == null || Number.isNaN(Number(value))) return "";
-  if (value < 3) return "danger";
-  if (value < 4) return "warn";
+  if (isLowDays(value)) return "danger";
   return "ok";
 }
 
 function isLowRunway(row) {
-  return row?.days_remaining != null && Number(row.days_remaining) < 3;
+  return isLowDays(row?.days_remaining);
 }
 
 function derived(row) {
@@ -140,8 +146,8 @@ function sortedSidebarAccounts(accounts) {
   return [...accounts].sort((a, b) => {
     const aDays = state.budgetByCid[a.customerId]?.days_remaining;
     const bDays = state.budgetByCid[b.customerId]?.days_remaining;
-    const aLow = aDays != null && aDays < 3;
-    const bLow = bDays != null && bDays < 3;
+    const aLow = isLowDays(aDays);
+    const bLow = isLowDays(bDays);
     if (aLow !== bLow) return aLow ? -1 : 1;
     if (aLow && bLow) return aDays - bDays;
     return String(a.name || a.customerId).localeCompare(String(b.name || b.customerId), "vi");
@@ -238,7 +244,7 @@ function renderOverviewKpis(rows) {
     ["Chi phí kỳ", formatMoney(cost)],
     ["Click", formatNumber(clicks)],
     ["Chuyển đổi", formatNumber(conv, 2)],
-    ["Còn dưới 3 ngày", String(low)],
+    [`Còn dưới ${LOW_RUNWAY_DAYS} ngày`, String(low)],
     ["NS còn lại", formatMoney(rows.reduce((sum, row) => sum + Number(row.remaining_budget || 0), 0))],
   ];
   els.overviewKpis.innerHTML = cards
@@ -315,12 +321,20 @@ async function showOverview() {
   await loadOverview();
 }
 
+let loadSeq = 0;
+
+function isStaleLoad(seq, view, cid = null) {
+  return seq !== loadSeq || state.view !== view || (cid != null && state.selectedCid !== cid);
+}
+
 async function loadOverview() {
   showOverviewScreen();
+  const seq = ++loadSeq;
   state.loading = true;
   els.overviewStatus.textContent = "Đang tải chỉ số và ngân sách còn lại...";
   try {
     const data = await api.fetchOverview(toApiParams(state.date));
+    if (isStaleLoad(seq, "overview")) return;
     const rows = sortOverviewRows(Array.isArray(data?.rows) ? data.rows : []);
     state.overviewRows = rows;
     state.budgetByCid = Object.fromEntries(rows.map((row) => [row.customerId, row]));
@@ -329,13 +343,14 @@ async function loadOverview() {
     renderAccounts();
     const low = rows.filter(isLowRunway).length;
     els.overviewStatus.textContent = low
-      ? `${rows.length} tài khoản • ${low} tài khoản còn dưới 3 ngày (đưa lên đầu)`
+      ? `${rows.length} tài khoản • ${low} tài khoản còn dưới ${LOW_RUNWAY_DAYS} ngày (đưa lên đầu)`
       : `${rows.length} tài khoản`;
     if (!rows.length) {
       els.overview.classList.add("hidden");
       els.emptyMain.classList.remove("hidden");
     }
   } catch (err) {
+    if (isStaleLoad(seq, "overview")) return;
     els.overviewStatus.textContent = err.message || "Không tải được trang tổng quan.";
     showToast(err.message || "Không tải được trang tổng quan.", true);
   } finally {
@@ -564,14 +579,17 @@ async function dismissRecommendationsNow() {
 
 async function loadAll() {
   if (!state.selectedCid) return;
+  const cid = state.selectedCid;
+  const seq = ++loadSeq;
   const dateFilter = toApiParams(state.date);
   state.loading = true;
   setBusy("Đang lấy dữ liệu từ Railway...");
   try {
     const [customer, table] = await Promise.all([
-      api.fetchMetrics("customer", state.selectedCid, dateFilter),
-      api.fetchMetrics(state.tab, state.selectedCid, dateFilter),
+      api.fetchMetrics("customer", cid, dateFilter),
+      api.fetchMetrics(state.tab, cid, dateFilter),
     ]);
+    if (isStaleLoad(seq, "detail", cid)) return;
     const kpi = Array.isArray(customer?.rows) ? customer.rows[0] : null;
     state.kpis = kpi;
     state.rows = Array.isArray(table?.rows) ? table.rows : [];
@@ -587,6 +605,7 @@ async function loadAll() {
     renderTable();
     setBusy(`${state.rows.length} dòng • kỳ ${state.date.start === state.date.end ? state.date.start : `${state.date.start} → ${state.date.end}`}`);
   } catch (err) {
+    if (isStaleLoad(seq, "detail", cid)) return;
     state.kpis = null;
     state.rows = [];
     renderKpis();
@@ -716,6 +735,36 @@ els.settingsTest.addEventListener("click", async () => {
   } catch (err) {
     els.settingsStatus.className = "form-error";
     els.settingsStatus.textContent = err.message;
+  }
+});
+
+function formatCidSyncResult(result) {
+  const parts = (result?.results || []).map((r) => {
+    if (r.ok) return `MCC ${r.mcc_id}: ${r.synced} CID, xóa ${r.removed} map cũ`;
+    return `MCC ${r.mcc_id}: lỗi — ${r.error || ""}`;
+  });
+  const pending = result?.pending_mcc_ids || [];
+  if (pending.length) parts.push(`Chưa kịp đồng bộ: ${pending.join(", ")} (bấm lại)`);
+  return parts.join("; ") || "Không có MCC nào.";
+}
+
+els.settingsSyncCid.addEventListener("click", async () => {
+  const btn = els.settingsSyncCid;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Đang đồng bộ...";
+  els.settingsStatus.className = "form-error";
+  els.settingsStatus.textContent = "Đang đồng bộ CID-MCC, có thể mất vài phút...";
+  try {
+    const result = await api.syncCidMcc();
+    els.settingsStatus.className = result?.all_ok ? "form-error ok" : "form-error";
+    els.settingsStatus.textContent = formatCidSyncResult(result);
+  } catch (err) {
+    els.settingsStatus.className = "form-error";
+    els.settingsStatus.textContent = err.message || "Không đồng bộ được CID-MCC.";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
 });
 

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 300,
+      "includeFiles": "{templates/**,*.py}"
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "crons": [
+    { "path": "/cron/cid-sync", "schedule": "0 22 * * *" },
+    { "path": "/cron/rec-dismiss", "schedule": "0 0 * * *" },
+    { "path": "/cron/budget-alert", "schedule": "0 4 * * *" }
+  ]
+}

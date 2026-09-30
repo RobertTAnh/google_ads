@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -81,6 +82,36 @@ _REC_DISMISS_SCHEDULER_STARTED = False
 _REC_DISMISS_START_LOCK = threading.Lock()
 _REC_DISMISS_LEADER_LOCK_ID = 8104202604
 _DEFAULT_REC_DISMISS_HOUR = 7
+_VERCEL_JOB_TIME_BUDGET_SECONDS = 250.0
+
+
+def _is_vercel() -> bool:
+    return bool((os.getenv("VERCEL") or "").strip())
+
+
+def _job_deadline() -> Optional[float]:
+    """Vercel cắt request sau ~300s nên job phải tự dừng sớm; Railway/local chạy không giới hạn."""
+    if _is_vercel():
+        return time.monotonic() + _VERCEL_JOB_TIME_BUDGET_SECONDS
+    return None
+
+
+def _deadline_passed(deadline: Optional[float]) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _release_advisory_lock(conn: Optional[psycopg.Connection], lock_id: int) -> None:
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (lock_id,))
+    except Exception:
+        pass
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 def _env_list(name: str, default: str = "") -> List[str]:
@@ -102,6 +133,9 @@ def _maybe_bootstrap_google_ads_yaml(project_root: Path) -> str:
     yaml_path = project_root / "google-ads.yaml"
     if yaml_path.exists():
         return str(yaml_path)
+    if _is_vercel():
+        # Vercel chỉ cho ghi vào /tmp.
+        yaml_path = Path("/tmp") / "google-ads.yaml"
 
     raw_b64 = (os.getenv("GOOGLE_ADS_YAML_B64") or "").strip()
     raw_text = os.getenv("GOOGLE_ADS_YAML_TEXT")
@@ -509,7 +543,9 @@ def _budget_alert_timezone() -> str:
 
 
 def _parse_budget_alert_schedule_hours() -> tuple[int, ...]:
-    raw = (os.getenv("BUDGET_ALERT_SCHEDULE_HOURS") or "11,15,21,23").strip()
+    # Vercel Hobby chỉ cho cron chạy 1 lần/ngày (vercel.json: 04:00 UTC = 11:00 VN).
+    default_hours = "11" if _is_vercel() else "11,15,21,23"
+    raw = (os.getenv("BUDGET_ALERT_SCHEDULE_HOURS") or default_hours).strip()
     hours: list[int] = []
     for part in raw.split(","):
         part = part.strip()
@@ -643,6 +679,77 @@ def _run_budget_check_for_watch(
     return ev
 
 
+def _checked_today(watch: dict, tz: ZoneInfo) -> bool:
+    raw = str(watch.get("last_check_at") or "").strip()
+    if not raw or str(watch.get("last_status") or "") == "error":
+        return False
+    try:
+        checked_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=ZoneInfo("UTC"))
+    return checked_at.astimezone(tz).date() == datetime.now(tz).date()
+
+
+def run_budget_alert_job(
+    database_url: str,
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    mcc_configs: dict,
+    *,
+    skip_checked_today: bool = False,
+    pause_seconds: float = 2.0,
+    deadline: Optional[float] = None,
+) -> dict:
+    """Kiểm tra toàn bộ watch đang bật một lần. Trả về tóm tắt; busy=True nếu instance khác đang chạy."""
+    log = logging.getLogger(__name__)
+    leader_conn = _acquire_budget_alert_leader(database_url)
+    if leader_conn is None:
+        return {"ok": False, "busy": True, "error": "Đang có lượt kiểm tra khác chạy."}
+    summary = {"ok": True, "checked": 0, "alerted": 0, "skipped": 0, "errors": 0, "remaining": 0}
+    try:
+        webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        tz = _safe_tz(_budget_alert_timezone())
+        watches = list_watch(database_url, active_only=True)
+        for idx, w in enumerate(watches):
+            if _deadline_passed(deadline):
+                summary["remaining"] = len(watches) - idx
+                break
+            if skip_checked_today and _checked_today(w, tz):
+                summary["skipped"] += 1
+                continue
+            try:
+                ev = _run_budget_check_for_watch(
+                    database_url,
+                    w,
+                    build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
+                    mcc_configs=mcc_configs,
+                    slack_webhook_url=webhook,
+                )
+                summary["checked"] += 1
+                if ev.should_alert:
+                    summary["alerted"] += 1
+            except GoogleAdsHelperError as ex:
+                summary["errors"] += 1
+                log.warning("Budget alert check %s: %s", w.get("customer_id"), ex)
+            except Exception as ex:
+                summary["errors"] += 1
+                log.exception("Budget alert check failed for %s", w.get("customer_id"))
+                cid = _normalize_customer_id(str(w.get("customer_id", "")))
+                if cid:
+                    update_watch_check_result(
+                        database_url,
+                        customer_id=cid,
+                        last_status="error",
+                        last_error=str(ex),
+                    )
+            if pause_seconds > 0:
+                time.sleep(pause_seconds)
+    finally:
+        _release_advisory_lock(leader_conn, _BUDGET_ALERT_LEADER_LOCK_ID)
+    return summary
+
+
 def _maybe_start_budget_alert_scheduler(
     database_url: Optional[str],
     build_google_ads_client_for_mcc: Callable[[str], Any],
@@ -663,7 +770,6 @@ def _maybe_start_budget_alert_scheduler(
 
     def _runner() -> None:
         global _last_budget_alert_slot_key
-        webhook = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
         tz_name = _budget_alert_timezone()
         while True:
             wait_sec, slot_dt = _next_budget_alert_slot(tz_name)
@@ -678,53 +784,19 @@ def _maybe_start_budget_alert_scheduler(
             if slot_key == _last_budget_alert_slot_key:
                 time.sleep(60)
                 continue
-            leader_conn: Optional[psycopg.Connection] = None
             try:
-                leader_conn = _acquire_budget_alert_leader(database_url)
-                if leader_conn is None:
+                log.info("Budget alert scheduler: chạy slot %s", slot_key)
+                result = run_budget_alert_job(
+                    database_url,
+                    build_google_ads_client_for_mcc,
+                    mcc_configs,
+                )
+                if result.get("busy"):
                     time.sleep(60)
                     continue
                 _last_budget_alert_slot_key = slot_key
-                log.info("Budget alert scheduler: chạy slot %s", slot_key)
-                watches = list_watch(database_url, active_only=True)
-                for w in watches:
-                    try:
-                        _run_budget_check_for_watch(
-                            database_url,
-                            w,
-                            build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
-                            mcc_configs=mcc_configs,
-                            slack_webhook_url=webhook,
-                        )
-                    except GoogleAdsHelperError as ex:
-                        log.warning("Budget alert check %s: %s", w.get("customer_id"), ex)
-                    except Exception as ex:
-                        log.exception("Budget alert check failed for %s", w.get("customer_id"))
-                        cid = _normalize_customer_id(str(w.get("customer_id", "")))
-                        if cid:
-                            update_watch_check_result(
-                                database_url,
-                                customer_id=cid,
-                                last_status="error",
-                                last_error=str(ex),
-                            )
-                    time.sleep(2)
             except Exception:
                 log.exception("Budget alert scheduler loop error")
-            finally:
-                if leader_conn is not None:
-                    try:
-                        with leader_conn.cursor() as cur:
-                            cur.execute(
-                                "SELECT pg_advisory_unlock(%s)",
-                                (_BUDGET_ALERT_LEADER_LOCK_ID,),
-                            )
-                    except Exception:
-                        pass
-                    try:
-                        leader_conn.close()
-                    except Exception:
-                        pass
 
     th = threading.Thread(target=_runner, daemon=True, name="budget-alert-scheduler")
     th.start()
@@ -798,6 +870,68 @@ def _run_rec_dismiss_for_watch(
     )
 
 
+def run_rec_dismiss_job(
+    database_url: str,
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    *,
+    enforce_due_hour: bool = False,
+    pause_seconds: float = 2.0,
+    deadline: Optional[float] = None,
+) -> dict:
+    """Bỏ qua đề xuất cho các CID chưa quét hôm nay. busy=True nếu instance khác đang chạy."""
+    log = logging.getLogger(__name__)
+    leader_conn = _acquire_rec_dismiss_leader(database_url)
+    if leader_conn is None:
+        return {"ok": False, "busy": True, "error": "Đang có lượt quét khác chạy."}
+    summary = {"ok": True, "processed": 0, "skipped": 0, "errors": 0, "remaining": 0}
+    try:
+        tz = _safe_tz(_rec_dismiss_timezone())
+        now = datetime.now(tz)
+        day_key = now.date().isoformat()
+        due_at = now.replace(hour=_parse_rec_dismiss_hour(), minute=0, second=0, microsecond=0)
+        if enforce_due_hour and now < due_at:
+            summary["not_due"] = True
+            return summary
+        watches = list_auto_dismiss(database_url, active_only=True)
+        log.info("Recommendation dismiss: quét %s CID ngày %s", len(watches), day_key)
+        for idx, w in enumerate(watches):
+            if _deadline_passed(deadline):
+                summary["remaining"] = len(watches) - idx
+                break
+            cid = _normalize_customer_id(str(w.get("customer_id", "")))
+            if not cid:
+                continue
+            if str(w.get("last_run_date") or "") == day_key:
+                summary["skipped"] += 1
+                continue
+            try:
+                _run_rec_dismiss_for_watch(
+                    database_url,
+                    w,
+                    build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
+                    day_key=day_key,
+                )
+                summary["processed"] += 1
+            except Exception as ex:
+                summary["errors"] += 1
+                if isinstance(ex, GoogleAdsHelperError):
+                    log.warning("Auto-dismiss recommendations %s: %s", cid, ex)
+                else:
+                    log.exception("Auto-dismiss recommendations failed for %s", cid)
+                update_auto_dismiss_run(
+                    database_url,
+                    customer_id=cid,
+                    last_status="error",
+                    last_run_date=day_key,
+                    last_error=str(ex),
+                )
+            if pause_seconds > 0:
+                time.sleep(pause_seconds)
+    finally:
+        _release_advisory_lock(leader_conn, _REC_DISMISS_LEADER_LOCK_ID)
+    return summary
+
+
 def _maybe_start_rec_dismiss_scheduler(
     database_url: Optional[str],
     build_google_ads_client_for_mcc: Callable[[str], Any],
@@ -832,73 +966,16 @@ def _maybe_start_rec_dismiss_scheduler(
                 " catch-up" if catch_up else "",
             )
             time.sleep(wait_sec)
-            leader_conn: Optional[psycopg.Connection] = None
             try:
-                leader_conn = _acquire_rec_dismiss_leader(database_url)
-                if leader_conn is None:
-                    time.sleep(60)
-                    continue
-                tz = _safe_tz(tz_name)
-                now = datetime.now(tz)
-                day_key = now.date().isoformat()
-                hour = _parse_rec_dismiss_hour()
-                due_at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-                if now < due_at:
-                    continue
-                watches = list_auto_dismiss(database_url, active_only=True)
-                log.info(
-                    "Recommendation dismiss scheduler: quét %s CID ngày %s",
-                    len(watches),
-                    day_key,
+                result = run_rec_dismiss_job(
+                    database_url,
+                    build_google_ads_client_for_mcc,
+                    enforce_due_hour=True,
                 )
-                for w in watches:
-                    cid = _normalize_customer_id(str(w.get("customer_id", "")))
-                    if not cid:
-                        continue
-                    if str(w.get("last_run_date") or "") == day_key:
-                        continue
-                    try:
-                        _run_rec_dismiss_for_watch(
-                            database_url,
-                            w,
-                            build_google_ads_client_for_mcc=build_google_ads_client_for_mcc,
-                            day_key=day_key,
-                        )
-                    except GoogleAdsHelperError as ex:
-                        log.warning("Auto-dismiss recommendations %s: %s", cid, ex)
-                        update_auto_dismiss_run(
-                            database_url,
-                            customer_id=cid,
-                            last_status="error",
-                            last_run_date=day_key,
-                            last_error=str(ex),
-                        )
-                    except Exception as ex:
-                        log.exception("Auto-dismiss recommendations failed for %s", cid)
-                        update_auto_dismiss_run(
-                            database_url,
-                            customer_id=cid,
-                            last_status="error",
-                            last_run_date=day_key,
-                            last_error=str(ex),
-                        )
-                    time.sleep(2)
+                if result.get("busy"):
+                    time.sleep(60)
             except Exception:
                 log.exception("Recommendation dismiss scheduler loop error")
-            finally:
-                if leader_conn is not None:
-                    try:
-                        with leader_conn.cursor() as cur:
-                            cur.execute(
-                                "SELECT pg_advisory_unlock(%s)",
-                                (_REC_DISMISS_LEADER_LOCK_ID,),
-                            )
-                    except Exception:
-                        pass
-                    try:
-                        leader_conn.close()
-                    except Exception:
-                        pass
 
     th = threading.Thread(target=_runner, daemon=True, name="rec-dismiss-scheduler")
     th.start()
@@ -1036,6 +1113,88 @@ def _maybe_start_report_scheduler(path: Path, database_url: Optional[str]) -> No
     th.start()
 
 
+def run_cid_sync_job(
+    database_url: str,
+    mcc_ids: List[str],
+    build_google_ads_client_for_mcc: Callable[[str], Any],
+    *,
+    deadline: Optional[float] = None,
+) -> dict:
+    """
+    Quét tài khoản con của từng MCC: upsert CID đang bật, xóa map cùng mcc_id không còn trong lần quét.
+    busy=True nếu instance khác đang đồng bộ.
+    """
+    log = logging.getLogger(__name__)
+    mids = sorted({_normalize_customer_id(x) for x in mcc_ids if _normalize_customer_id(x)})
+    if not mids:
+        return {"ok": False, "error": "Chưa cấu hình MCC nào để đồng bộ."}
+    leader_conn = _acquire_cid_sync_leader(database_url)
+    if leader_conn is None:
+        return {"ok": False, "busy": True, "error": "Đang có lượt đồng bộ khác chạy, thử lại sau."}
+    results: List[dict] = []
+    pending: List[str] = []
+    try:
+        for idx, mid in enumerate(mids):
+            if _deadline_passed(deadline):
+                pending = mids[idx:]
+                break
+            try:
+                client = build_google_ads_client_for_mcc(mid)
+                children = list_child_accounts_under_mcc(client, mid)
+                active_rows: List[tuple[str, str]] = []
+                for ch in children:
+                    if not _customer_client_map_active(ch.status):
+                        continue
+                    cid = _normalize_customer_id(ch.customer_id)
+                    if not cid:
+                        continue
+                    active_rows.append((cid, (ch.customer_name or "").strip()))
+                for cid, name in active_rows:
+                    upsert_mapping_sync(
+                        database_url,
+                        customer_id=cid,
+                        mcc_id=mid,
+                        suggested_label=name,
+                        active=True,
+                    )
+                removed = delete_mappings_for_mcc_except_customer_ids(
+                    database_url,
+                    mcc_id=mid,
+                    keep_customer_ids=[c for c, _ in active_rows],
+                )
+                results.append({"mcc_id": mid, "ok": True, "synced": len(active_rows), "removed": removed})
+            except Exception as ex:
+                log.warning("CID↔MCC sync skipped for MCC %s: %s", mid, ex)
+                results.append({"mcc_id": mid, "ok": False, "error": str(ex)})
+    finally:
+        _release_advisory_lock(leader_conn, _CID_SYNC_LEADER_LOCK_ID)
+    return {
+        "ok": all(r.get("ok") for r in results) and not pending,
+        "results": results,
+        "pending_mcc_ids": pending,
+    }
+
+
+def _format_cid_sync_summary(result: dict) -> str:
+    if result.get("busy") or (result.get("error") and not result.get("results")):
+        return str(result.get("error") or "Không đồng bộ được.")
+    parts: List[str] = []
+    for r in result.get("results", []):
+        mcc = _format_customer_id_display(str(r.get("mcc_id", "")))
+        if r.get("ok"):
+            parts.append(f"MCC {mcc}: {r.get('synced', 0)} CID, xóa {r.get('removed', 0)} map cũ")
+        else:
+            parts.append(f"MCC {mcc}: lỗi — {r.get('error', '')}")
+    pending = result.get("pending_mcc_ids") or []
+    if pending:
+        parts.append(
+            "Chưa kịp đồng bộ: "
+            + ", ".join(_format_customer_id_display(m) for m in pending)
+            + " (hết thời gian xử lý, bấm đồng bộ lại)"
+        )
+    return "; ".join(parts) or "Không có MCC nào."
+
+
 def _maybe_start_cid_mcc_sync_scheduler(
     database_url: Optional[str],
     mcc_ids: List[str],
@@ -1065,52 +1224,13 @@ def _maybe_start_cid_mcc_sync_scheduler(
     def _runner() -> None:
         interval = max(60, int((os.getenv("CID_SYNC_INTERVAL_SECONDS") or "3600").strip() or 3600))
         while True:
-            leader_conn: Optional[psycopg.Connection] = None
             try:
-                leader_conn = _acquire_cid_sync_leader(database_url)
-                if leader_conn is None:
+                result = run_cid_sync_job(database_url, mids, build_google_ads_client_for_mcc)
+                if result.get("busy"):
                     time.sleep(30)
                     continue
-                for mid in mids:
-                    try:
-                        client = build_google_ads_client_for_mcc(mid)
-                        children = list_child_accounts_under_mcc(client, mid)
-                        active_rows: List[tuple[str, str]] = []
-                        for ch in children:
-                            if not _customer_client_map_active(ch.status):
-                                continue
-                            cid = _normalize_customer_id(ch.customer_id)
-                            if not cid:
-                                continue
-                            active_rows.append((cid, (ch.customer_name or "").strip()))
-                        for cid, name in active_rows:
-                            upsert_mapping_sync(
-                                database_url,
-                                customer_id=cid,
-                                mcc_id=mid,
-                                suggested_label=name,
-                                active=True,
-                            )
-                        delete_mappings_for_mcc_except_customer_ids(
-                            database_url,
-                            mcc_id=mid,
-                            keep_customer_ids=[c for c, _ in active_rows],
-                        )
-                    except Exception as ex:
-                        log.warning("CID↔MCC sync skipped for MCC %s: %s", mid, ex)
             except Exception:
                 log.exception("CID↔MCC sync loop error")
-            finally:
-                if leader_conn is not None:
-                    try:
-                        with leader_conn.cursor() as cur:
-                            cur.execute("SELECT pg_advisory_unlock(%s)", (_CID_SYNC_LEADER_LOCK_ID,))
-                    except Exception:
-                        pass
-                    try:
-                        leader_conn.close()
-                    except Exception:
-                        pass
             time.sleep(interval)
 
     th = threading.Thread(target=_runner, daemon=True, name="cid-mcc-sync")
@@ -1134,6 +1254,9 @@ def create_app() -> Flask:
     google_ads_yaml = _maybe_bootstrap_google_ads_yaml(project_root)
     report_projects_file = _report_projects_path(project_root)
     database_url = _normalize_database_url((os.getenv("DATABASE_URL") or "").strip())
+    on_vercel = _is_vercel()
+    if on_vercel and not database_url:
+        raise RuntimeError("Chạy trên Vercel bắt buộc có DATABASE_URL (không ghi file lâu dài được).")
     if database_url:
         try:
             _init_report_projects_table(database_url)
@@ -1145,7 +1268,9 @@ def create_app() -> Flask:
             init_recommendation_auto_dismiss_table(database_url)
         except Exception as ex:
             raise RuntimeError(f"Cannot initialize report_projects table: {ex}") from ex
-    _maybe_start_report_scheduler(report_projects_file, database_url or None)
+    # Vercel không giữ tiến trình chạy nền: các job chạy qua /cron/* (vercel.json).
+    if not on_vercel:
+        _maybe_start_report_scheduler(report_projects_file, database_url or None)
 
     # Single-MCC fallback config (legacy).
     mcc_login_customer_id = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or None
@@ -1198,16 +1323,29 @@ def create_app() -> Flask:
     mcc_ids_for_cid_sync: List[str] = (
         list(mcc_configs.keys()) if mcc_configs else ([default_mcc_id] if default_mcc_id else [])
     )
-    _maybe_start_cid_mcc_sync_scheduler(database_url or None, mcc_ids_for_cid_sync, _build_google_ads_client_for_mcc)
-    _maybe_start_budget_alert_scheduler(
-        database_url or None,
-        _build_google_ads_client_for_mcc,
-        mcc_configs,
-    )
-    _maybe_start_rec_dismiss_scheduler(
-        database_url or None,
-        _build_google_ads_client_for_mcc,
-    )
+    if not on_vercel:
+        _maybe_start_cid_mcc_sync_scheduler(
+            database_url or None, mcc_ids_for_cid_sync, _build_google_ads_client_for_mcc
+        )
+        _maybe_start_budget_alert_scheduler(
+            database_url or None,
+            _build_google_ads_client_for_mcc,
+            mcc_configs,
+        )
+        _maybe_start_rec_dismiss_scheduler(
+            database_url or None,
+            _build_google_ads_client_for_mcc,
+        )
+
+    def _run_cid_sync_now() -> dict:
+        if not database_url:
+            return {"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}
+        return run_cid_sync_job(
+            database_url,
+            mcc_ids_for_cid_sync,
+            _build_google_ads_client_for_mcc,
+            deadline=_job_deadline(),
+        )
 
     # Predefined client customer IDs (comma-separated) for the dashboard.
     # Example: CLIENT_CUSTOMER_IDS=1234567890,0987654321
@@ -1231,7 +1369,8 @@ def create_app() -> Flask:
         if request.endpoint in public_endpoints:
             return None
         # API MCP: xác thực bằng MCP_API_KEY trong blueprint, không dùng session đăng nhập web.
-        if (request.path or "").startswith("/mcp/v1"):
+        # Cron: xác thực bằng CRON_SECRET trong từng route.
+        if (request.path or "").startswith(("/mcp/v1", "/cron/")):
             return None
         if session.get("is_authenticated"):
             return None
@@ -1832,6 +1971,69 @@ def create_app() -> Flask:
             flash("Đã xóa map.", "info")
         return redirect(url_for("cid_mcc_map_page"))
 
+    @app.post("/cid-mcc-map/sync")
+    def cid_mcc_map_sync():
+        try:
+            result = _run_cid_sync_now()
+        except Exception as e:
+            flash(f"Lỗi đồng bộ: {e}", "danger")
+            return redirect(url_for("cid_mcc_map_page"))
+        category = "success" if result.get("ok") else ("warning" if result.get("busy") else "danger")
+        flash(f"Đồng bộ CID↔MCC: {_format_cid_sync_summary(result)}", category)
+        return redirect(url_for("cid_mcc_map_page"))
+
+    def _cron_auth_error():
+        secret = (os.getenv("CRON_SECRET") or "").strip()
+        if not secret:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình CRON_SECRET."}), 503
+        got = (request.headers.get("Authorization") or "").strip()
+        if not hmac.compare_digest(got, f"Bearer {secret}"):
+            return jsonify({"ok": False, "error": "Unauthorized."}), 401
+        if not database_url:
+            return jsonify({"ok": False, "error": "Server chưa cấu hình DATABASE_URL."}), 503
+        return None
+
+    def _cron_response(result: dict):
+        status = 200 if result.get("ok") or result.get("busy") else 500
+        return jsonify(result), status
+
+    @app.get("/cron/budget-alert")
+    def cron_budget_alert():
+        err = _cron_auth_error()
+        if err:
+            return err
+        return _cron_response(
+            run_budget_alert_job(
+                database_url,
+                _build_google_ads_client_for_mcc,
+                mcc_configs,
+                skip_checked_today=True,
+                pause_seconds=0.5 if on_vercel else 2.0,
+                deadline=_job_deadline(),
+            )
+        )
+
+    @app.get("/cron/rec-dismiss")
+    def cron_rec_dismiss():
+        err = _cron_auth_error()
+        if err:
+            return err
+        return _cron_response(
+            run_rec_dismiss_job(
+                database_url,
+                _build_google_ads_client_for_mcc,
+                pause_seconds=0.5 if on_vercel else 2.0,
+                deadline=_job_deadline(),
+            )
+        )
+
+    @app.get("/cron/cid-sync")
+    def cron_cid_sync():
+        err = _cron_auth_error()
+        if err:
+            return err
+        return _cron_response(_run_cid_sync_now())
+
     @app.get("/budget-alerts")
     def budget_alerts_page():
         if not database_url:
@@ -1999,6 +2201,7 @@ def create_app() -> Flask:
         normalize_customer_id=_normalize_customer_id,
         default_mcc_id=default_mcc_id,
         database_url=database_url or None,
+        run_cid_sync=_run_cid_sync_now,
     )
 
     return app

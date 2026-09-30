@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("adsDesk", {
   saveSettings: (patch) => ipcRenderer.invoke("save-settings", patch),
   setOpenAtLogin: (enabled) => ipcRenderer.invoke("set-open-at-login", enabled),
   testConnection: () => ipcRenderer.invoke("test-connection"),
+  syncCidMcc: () => ipcRenderer.invoke("sync-cid-mcc"),
   addAccount: (cid) => ipcRenderer.invoke("add-account", cid),
   removeAccount: (cid) => ipcRenderer.invoke("remove-account", cid),
   renameAccount: (customerId, name) => ipcRenderer.invoke("rename-account", { customerId, name }),

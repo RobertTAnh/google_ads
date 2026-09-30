@@ -24,7 +24,7 @@ function dateFilterParams(dateFilter = {}) {
   return { date_range: String(dateFilter.date_range || "TODAY").trim() || "TODAY" };
 }
 
-function requestJson({ url, apiKey, method = "GET", jsonBody = null, timeoutMs = 180000 }) {
+function requestJson({ url, apiKey, method = "GET", jsonBody = null, timeoutMs = 45000 }) {
   return new Promise((resolve, reject) => {
     const request = net.request({ method, url });
     request.setHeader("Accept", "application/json");
@@ -78,7 +78,7 @@ function requestJson({ url, apiKey, method = "GET", jsonBody = null, timeoutMs =
   });
 }
 
-async function mcpGet(settings, pathname, params = {}, { auth = true, method = "GET", jsonBody = null } = {}) {
+async function mcpGet(settings, pathname, params = {}, { auth = true, method = "GET", jsonBody = null, timeoutMs } = {}) {
   const baseUrl = String(settings.baseUrl || "").trim();
   const apiKey = String(settings.apiKey || "").trim();
   if (!baseUrl) {
@@ -93,6 +93,7 @@ async function mcpGet(settings, pathname, params = {}, { auth = true, method = "
     apiKey: auth ? apiKey : "",
     method,
     jsonBody,
+    timeoutMs,
   });
   if (json && json.ok === false) {
     const err = new Error(json.error || `Railway báo lỗi (HTTP ${status}).`);
@@ -255,12 +256,18 @@ async function dismissRecommendations(settings, customerId, { mccId = "", dismis
         dismiss_all: Boolean(dismissAll),
         resource_names: resourceNames,
       },
+      timeoutMs: 180000,
     }
   );
 }
 
+async function syncCidMcc(settings) {
+  return mcpGet(settings, "/mcp/v1/cid_mcc_sync", {}, { method: "POST", jsonBody: {}, timeoutMs: 330000 });
+}
+
 module.exports = {
   normalizeCid,
+  syncCidMcc,
   health,
   ping,
   resolveMcc,
