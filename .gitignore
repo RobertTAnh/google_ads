@@ -16,3 +16,6 @@ installer/windows/release/
 installer/windows/GoogleAdsMCP-Windows-Setup.zip
 *.spec
 
+
+.vercel
+.env*
