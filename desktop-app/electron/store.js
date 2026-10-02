@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { app } = require("electron");
 
-const DEFAULT_BASE_URL = "https://web-production-f8738.up.railway.app";
+const DEFAULT_BASE_URL = "https://google-ads-beta-five.vercel.app";
 
 function storePath() {
   return path.join(app.getPath("userData"), "ads-manager-settings.json");

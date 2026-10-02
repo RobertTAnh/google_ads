@@ -3,7 +3,7 @@ installer/
 scripts/
 .venv/
 __pycache__/
-.env
+.env*
 *.bat
 debug.log
 report_projects.json

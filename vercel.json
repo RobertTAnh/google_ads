@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["sin1"],
   "crons": [
     {
       "path": "/cron/cid-sync",
@@ -17,7 +18,7 @@
   "services": {
     "web": {
       "root": ".",
-      "entrypoint": "api.index:app"
+      "entrypoint": "wsgi:app"
     }
   },
   "rewrites": [
