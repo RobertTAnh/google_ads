@@ -452,6 +452,28 @@ class DismissRecommendationsResult:
 
 
 @dataclass(frozen=True)
+class CampaignOptimizationScoreRow:
+    campaign_id: str
+    campaign_name: str
+    status: str
+    advertising_channel_type: str
+    optimization_score: Optional[float]
+    optimization_score_percent: Optional[float]
+
+
+@dataclass(frozen=True)
+class OptimizationScoreResult:
+    """Điểm tối ưu hóa (Optimization score) cấp tài khoản và từng campaign."""
+
+    customer_id: str
+    descriptive_name: str
+    optimization_score: Optional[float]
+    optimization_score_percent: Optional[float]
+    optimization_score_weight: Optional[float]
+    campaigns: Tuple[CampaignOptimizationScoreRow, ...]
+
+
+@dataclass(frozen=True)
 class KeywordIdeaRow:
     """Ý tưởng từ khóa từ KeywordPlanIdeaService.GenerateKeywordIdeas (Keyword Planner)."""
 
@@ -3024,6 +3046,113 @@ def list_recommendations_for_customer(
 
     rows.sort(key=lambda x: (x.type, x.campaign_id, x.recommendation_id))
     return rows
+
+
+def _optional_double(msg: Any, field: str) -> Optional[float]:
+    try:
+        if field not in msg:
+            return None
+    except TypeError:
+        pass
+    value = getattr(msg, field, None)
+    return float(value) if value is not None else None
+
+
+def _score_percent(score: Optional[float]) -> Optional[float]:
+    return round(score * 100, 1) if score is not None else None
+
+
+def get_optimization_score(
+    client: GoogleAdsClient,
+    customer_id: str,
+    *,
+    campaign_id: Optional[str] = None,
+    include_paused: bool = True,
+) -> OptimizationScoreResult:
+    """
+    Đọc Optimization score (0–1, kèm %) của tài khoản và từng campaign chưa xóa.
+    Campaign không đủ điều kiện có điểm (vd không hỗ trợ / thiếu dữ liệu) trả optimization_score = None.
+    """
+    cid = normalize_google_ads_customer_id(customer_id)
+    if not cid:
+        raise GoogleAdsHelperError("customer_id hợp lệ là bắt buộc.")
+
+    cap_id = str(campaign_id or "").strip().replace("-", "")
+    if cap_id and not cap_id.isdigit():
+        raise GoogleAdsHelperError("campaign_id không hợp lệ.")
+
+    where_parts = ["campaign.status != REMOVED"]
+    if not include_paused:
+        where_parts.append("campaign.status = ENABLED")
+    if cap_id:
+        where_parts.append(f"campaign.id = {cap_id}")
+
+    ga_service = client.get_service("GoogleAdsService")
+    customer_q = """
+        SELECT
+          customer.id,
+          customer.descriptive_name,
+          customer.optimization_score,
+          customer.optimization_score_weight
+        FROM customer
+        LIMIT 1
+    """.strip()
+    campaign_q = f"""
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.advertising_channel_type,
+          campaign.optimization_score
+        FROM campaign
+        WHERE {" AND ".join(where_parts)}
+    """.strip()
+
+    try:
+        cust_rows = list(ga_service.search(customer_id=cid, query=customer_q))
+        campaigns: List[CampaignOptimizationScoreRow] = []
+        for batch in ga_service.search_stream(customer_id=cid, query=campaign_q):
+            for r in batch.results:
+                camp = r.campaign
+                score = _optional_double(camp, "optimization_score")
+                campaigns.append(
+                    CampaignOptimizationScoreRow(
+                        campaign_id=str(camp.id),
+                        campaign_name=str(camp.name or ""),
+                        status=_proto_enum_name(getattr(camp, "status", None)),
+                        advertising_channel_type=_proto_enum_name(
+                            getattr(camp, "advertising_channel_type", None)
+                        ),
+                        optimization_score=score,
+                        optimization_score_percent=_score_percent(score),
+                    )
+                )
+    except GoogleAdsException as ex:
+        raise GoogleAdsHelperError(
+            f"Google Ads API error reading optimization score for {cid}:\n{_format_googleads_exception(ex)}"
+        ) from ex
+    except (google_api_exceptions.GoogleAPICallError, google_api_exceptions.RetryError) as ex:
+        raise GoogleAdsHelperError(f"Transport error for customer {cid}: {ex}") from ex
+
+    cust = cust_rows[0].customer if cust_rows else None
+    cust_score = _optional_double(cust, "optimization_score") if cust is not None else None
+    cust_weight = _optional_double(cust, "optimization_score_weight") if cust is not None else None
+
+    campaigns.sort(
+        key=lambda x: (
+            x.optimization_score is None,
+            x.optimization_score if x.optimization_score is not None else 0.0,
+            x.campaign_name,
+        )
+    )
+    return OptimizationScoreResult(
+        customer_id=cid,
+        descriptive_name=str(getattr(cust, "descriptive_name", "") or "") if cust is not None else "",
+        optimization_score=cust_score,
+        optimization_score_percent=_score_percent(cust_score),
+        optimization_score_weight=cust_weight,
+        campaigns=tuple(campaigns),
+    )
 
 
 def dismiss_recommendations(

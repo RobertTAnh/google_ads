@@ -47,6 +47,7 @@ mcp = FastMCP(
         "Pause/đổi tên/xóa campaign: ads_update_campaign (status=REMOVED để xóa). "
         "Đổi ngân sách ngày: ads_update_campaign_budget. "
         "Đề xuất: ads_get_recommendations; bỏ qua: ads_dismiss_recommendations. "
+        "Điểm tối ưu hóa (Optimization score %): ads_get_optimization_score. "
         "Quét hàng ngày dismiss đề xuất: ads_recommendation_auto_dismiss / ads_set_recommendation_auto_dismiss."
     ),
 )
@@ -1084,6 +1085,28 @@ def ads_get_recommendations(
     if include_dismissed:
         p["include_dismissed"] = "true"
     return _get("/mcp/v1/recommendations", p)
+
+
+@mcp.tool()
+def ads_get_optimization_score(
+    customer_id: str,
+    mcc_id: str = "",
+    campaign_id: str = "",
+    include_paused: bool = True,
+) -> str:
+    """
+    Điểm tối ưu hóa (Optimization score, tab Đề xuất) của tài khoản và từng campaign chưa xóa.
+    Trả optimization_score (0–1) và optimization_score_percent (%); null = Google không tính điểm.
+    include_paused=false: chỉ campaign ENABLED.
+    """
+    p: dict[str, Any] = {"customer_id": customer_id}
+    if mcc_id.strip():
+        p["mcc_id"] = mcc_id.strip()
+    if campaign_id.strip():
+        p["campaign_id"] = campaign_id.strip()
+    if not include_paused:
+        p["include_paused"] = "false"
+    return _get("/mcp/v1/optimization_score", p)
 
 
 @mcp.tool()

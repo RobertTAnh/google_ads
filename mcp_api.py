@@ -47,6 +47,7 @@ from google_ads_helper import (
     list_responsive_search_ads,
     list_ad_groups_for_customer,
     list_recommendations_for_customer,
+    get_optimization_score,
     dismiss_recommendations,
     dismiss_all_recommendations,
     get_ad_group_metrics_for_date_range,
@@ -2152,6 +2153,57 @@ def register_mcp_routes(
                     "customer_id": cid,
                     "note": "resource_name / recommendation_id dùng cho POST /dismiss_recommendations.",
                     "rows": [asdict(r) for r in rows],
+                }
+            )
+        except GoogleAdsHelperError as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+
+    @bp.get("/optimization_score")
+    def optimization_score():
+        """Điểm tối ưu hóa (Optimization score %) của tài khoản và từng campaign."""
+        err = _mcp_auth_error_response()
+        if err:
+            return err
+        cid = normalize_customer_id(request.args.get("customer_id", ""))
+        if not cid:
+            return jsonify({"ok": False, "error": "Thiếu customer_id."}), 400
+        mcc_id, mcc_resolved_via = _resolve_mcc_pair(use_db_lookup=True)
+        if not mcc_id:
+            return jsonify({"ok": False, "error": _MCC_ERR}), 400
+
+        raw_cap = (request.args.get("campaign_id") or "").strip()
+        campaign_id = None
+        if raw_cap:
+            digits = "".join(ch for ch in raw_cap if ch.isdigit())
+            if not digits:
+                return jsonify({"ok": False, "error": "campaign_id không hợp lệ."}), 400
+            campaign_id = digits
+
+        paused_raw = request.args.get("include_paused", True)
+        if isinstance(paused_raw, bool):
+            include_paused = paused_raw
+        else:
+            include_paused = str(paused_raw or "").strip().lower() not in ("0", "false", "no", "off")
+
+        try:
+            client = build_google_ads_client_for_mcc(mcc_id)
+            result = get_optimization_score(
+                client,
+                cid,
+                campaign_id=campaign_id,
+                include_paused=include_paused,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "mcc_customer_id": mcc_id,
+                    "mcc_resolved_via": mcc_resolved_via,
+                    "customer_id": cid,
+                    "note": (
+                        "optimization_score: 0–1; optimization_score_percent: %. "
+                        "null = Google không tính điểm cho tài khoản/campaign đó."
+                    ),
+                    "result": asdict(result),
                 }
             )
         except GoogleAdsHelperError as e:
