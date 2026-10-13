@@ -7,7 +7,7 @@ $exe = Join-Path $env:LOCALAPPDATA "GoogleAdsMCP\GoogleAdsMCP.exe"
 $cfgDir = Join-Path $env:USERPROFILE ".gemini\config"
 $cfgPath = Join-Path $cfgDir "mcp_config.json"
 
-$base = "https://web-production-f8738.up.railway.app"
+$base = "https://google-ads-beta-five.vercel.app"
 $key = "y9dDbZOIvG71zYRAGRen8y2ZslZgTuD_1_N022CG5lNlqNR0TV1RoAvPehQHa3Wi"
 
 if (-not (Test-Path -LiteralPath $cfgDir)) {

@@ -738,6 +738,78 @@ tbody tr:hover {
   color: #94a3b8;
 }
 
+.name-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.google-name {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.row-edit {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  color: #94a3b8;
+  opacity: 0;
+}
+
+#overview-table tr:hover .row-edit {
+  opacity: 1;
+}
+
+.row-edit:hover {
+  border-color: var(--border);
+  background: white;
+  color: var(--accent);
+}
+
+.account-item .edit {
+  background: transparent;
+  border: 0;
+  color: #94a3b8;
+  padding: 4px 6px;
+  border-radius: 8px;
+  opacity: 0;
+}
+
+.account-item:hover .edit {
+  opacity: 1;
+}
+
+.account-item .edit:hover {
+  background: rgba(148, 163, 184, 0.2);
+  color: white;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-name {
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  color: var(--muted);
+}
+
+.edit-name:hover {
+  color: var(--accent);
+}
+
 .row-delete:hover {
   border-color: #fecaca;
   background: #fef2f2;

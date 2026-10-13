@@ -274,6 +274,37 @@ ipcMain.handle("rename-account", async (_event, payload) => {
   return publicState();
 });
 
+ipcMain.handle("set-account-alias", async (_event, payload) => {
+  const customerId = railway.normalizeCid(payload?.customerId);
+  if (customerId.length !== 10) {
+    throw new Error("CID phải đủ 10 chữ số.");
+  }
+  const alias = String(payload?.alias || "").trim();
+  const existing = state.accounts.find((row) => row.customerId === customerId);
+  if (existing) {
+    state = saveState({
+      ...state,
+      accounts: state.accounts.map((row) => (row.customerId === customerId ? { ...row, alias } : row)),
+    });
+  } else {
+    state = saveState({
+      ...state,
+      accounts: [
+        ...state.accounts,
+        {
+          customerId,
+          name: String(payload?.name || "").trim(),
+          alias,
+          mccId: String(payload?.mccId || "").replace(/\D/g, ""),
+          addedAt: new Date().toISOString(),
+          autoDismissRecommendations: false,
+        },
+      ],
+    });
+  }
+  return publicState();
+});
+
 ipcMain.handle("upsert-account", async (_event, payload) => {
   const customerId = railway.normalizeCid(payload?.customerId);
   if (customerId.length !== 10) {

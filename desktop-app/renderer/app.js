@@ -41,6 +41,13 @@ const els = {
   settingsSyncCid: document.getElementById("settings-sync-cid"),
   settingsCancel: document.getElementById("settings-cancel"),
   settingsSave: document.getElementById("settings-save"),
+  renameBtn: document.getElementById("rename-btn"),
+  aliasModal: document.getElementById("alias-modal"),
+  aliasForm: document.getElementById("alias-form"),
+  aliasGoogle: document.getElementById("alias-google"),
+  aliasInput: document.getElementById("alias-input"),
+  aliasReset: document.getElementById("alias-reset"),
+  aliasCancel: document.getElementById("alias-cancel"),
   toast: document.getElementById("toast"),
 };
 
@@ -73,6 +80,18 @@ function formatCid(cid) {
   const digits = String(cid || "").replace(/\D/g, "");
   if (digits.length !== 10) return cid || "";
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+function localAccount(customerId) {
+  return (state.settings?.accounts || []).find((row) => row.customerId === customerId);
+}
+
+function displayName(row) {
+  return localAccount(row?.customerId)?.alias || row?.name || "Chưa có tên";
+}
+
+function googleName(row) {
+  return row?.name || localAccount(row?.customerId)?.name || "";
 }
 
 function formatMoney(value) {
@@ -150,14 +169,14 @@ function sortedSidebarAccounts(accounts) {
     const bLow = isLowDays(bDays);
     if (aLow !== bLow) return aLow ? -1 : 1;
     if (aLow && bLow) return aDays - bDays;
-    return String(a.name || a.customerId).localeCompare(String(b.name || b.customerId), "vi");
+    return String(a.alias || a.name || a.customerId).localeCompare(String(b.alias || b.name || b.customerId), "vi");
   });
 }
 
 function renderAccounts() {
   const q = els.accountSearch.value.trim().toLowerCase();
   const accounts = sortedSidebarAccounts(state.settings?.accounts || []).filter((row) => {
-    const hay = `${row.name} ${row.customerId} ${formatCid(row.customerId)}`.toLowerCase();
+    const hay = `${row.alias} ${row.name} ${row.customerId} ${formatCid(row.customerId)}`.toLowerCase();
     return !q || hay.includes(q);
   });
   els.accountList.innerHTML = "";
@@ -183,18 +202,23 @@ function renderAccounts() {
     item.className = `account-item${row.customerId === state.selectedCid && state.view === "detail" ? " active" : ""}`;
     item.innerHTML = `
       <div class="meta">
-        <div class="name">${escapeHtml(row.name || "Chưa có tên")}</div>
+        <div class="name" title="${escapeHtml(row.alias ? `Google: ${row.name}` : row.name)}">${escapeHtml(displayName(row))}</div>
         <div class="cid">${escapeHtml(formatCid(row.customerId))}</div>
       </div>
       <div>
         ${days != null ? `<div class="days ${tone}">${escapeHtml(formatDays(days))}</div>` : ""}
+        <button class="edit" type="button" title="Đổi tên hiển thị">✎</button>
         <button class="remove" type="button" title="Xóa">✕</button>
       </div>
     `;
     item.addEventListener("click", () => selectAccount(row.customerId));
+    item.querySelector(".edit").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openAliasEditor(row);
+    });
     item.querySelector(".remove").addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      await unwatchAccount(row.customerId, row.name);
+      await unwatchAccount(row.customerId, displayName(row));
     });
     els.accountList.appendChild(item);
   }
@@ -207,6 +231,7 @@ function showEmpty() {
   els.overview.classList.add("hidden");
   els.detail.classList.add("hidden");
   els.backOverview.classList.add("hidden");
+  els.renameBtn.classList.add("hidden");
   els.accountName.textContent = "Tất cả tài khoản";
   els.accountCid.textContent = "Thêm CID để bắt đầu";
   renderAccounts();
@@ -219,6 +244,7 @@ function showOverviewScreen() {
   els.overview.classList.remove("hidden");
   els.detail.classList.add("hidden");
   els.backOverview.classList.add("hidden");
+  els.renameBtn.classList.add("hidden");
   els.accountName.textContent = "Tất cả tài khoản";
   els.accountCid.textContent = "Chỉ số kỳ đã chọn • ngân sách còn lại từ cảnh báo ngân sách";
   renderAccounts();
@@ -278,7 +304,16 @@ function renderOverviewTable(rows) {
       const derivedRow = derived(row);
       const tone = daysTone(row.days_remaining);
       return `<tr class="${isLowRunway(row) ? "row-low" : ""}" data-cid="${escapeHtml(row.customerId)}">
-        <td class="name-cell">${escapeHtml(row.name || "Chưa có tên")}</td>
+        <td class="name-cell">
+          <div class="name-wrap">
+            <span>${escapeHtml(displayName(row))}${
+              localAccount(row.customerId)?.alias && row.name
+                ? `<small class="google-name">${escapeHtml(row.name)}</small>`
+                : ""
+            }</span>
+            <button type="button" class="row-edit" title="Đổi tên hiển thị">✎</button>
+          </div>
+        </td>
         <td class="cid-cell">${escapeHtml(formatCid(row.customerId))}</td>
         <td class="num">${formatMoney(derivedRow.cost)}</td>
         <td class="num">${formatNumber(derivedRow.clicks)}</td>
@@ -294,13 +329,64 @@ function renderOverviewTable(rows) {
     })
     .join("");
   tbody.querySelectorAll("tr[data-cid]").forEach((tr) => {
+    const row = rows.find((item) => item.customerId === tr.dataset.cid);
     tr.addEventListener("click", () => selectAccount(tr.dataset.cid));
+    tr.querySelector(".row-edit")?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openAliasEditor(row);
+    });
     tr.querySelector(".row-delete")?.addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      const row = rows.find((item) => item.customerId === tr.dataset.cid);
-      await unwatchAccount(tr.dataset.cid, row?.name);
+      await unwatchAccount(tr.dataset.cid, displayName(row));
     });
   });
+}
+
+let aliasTarget = null;
+
+function openAliasEditor(row) {
+  if (!row?.customerId) return;
+  aliasTarget = row;
+  const gName = googleName(row);
+  els.aliasGoogle.textContent = `${formatCid(row.customerId)} • Tên Google: ${gName || "chưa có"}`;
+  els.aliasInput.value = localAccount(row.customerId)?.alias || gName;
+  els.aliasModal.classList.remove("hidden");
+  els.aliasInput.focus();
+  els.aliasInput.select();
+}
+
+function closeAliasEditor() {
+  aliasTarget = null;
+  els.aliasModal.classList.add("hidden");
+}
+
+async function saveAlias(alias) {
+  const row = aliasTarget;
+  if (!row) return;
+  const gName = googleName(row);
+  const value = alias.trim() === gName ? "" : alias.trim();
+  try {
+    state.settings = await api.setAccountAlias({
+      customerId: row.customerId,
+      alias: value,
+      name: gName,
+      mccId: row.mccId || "",
+    });
+    closeAliasEditor();
+    refreshNames();
+    showToast(value ? `Đã đổi tên hiển thị: ${value}` : "Đã dùng lại tên Google");
+  } catch (err) {
+    showToast(err.message || "Không lưu được tên hiển thị.", true);
+  }
+}
+
+function refreshNames() {
+  renderAccounts();
+  if (state.view === "overview" && state.overviewRows.length) renderOverviewTable(state.overviewRows);
+  if (state.view === "detail" && state.selectedCid) {
+    const acc = currentAccount();
+    els.accountName.textContent = displayName(acc || { customerId: state.selectedCid });
+  }
 }
 
 async function unwatchAccount(customerId, name) {
@@ -525,7 +611,8 @@ async function selectAccount(customerId) {
   els.overview.classList.add("hidden");
   els.detail.classList.remove("hidden");
   els.backOverview.classList.remove("hidden");
-  els.accountName.textContent = acc?.name || "Đang tải tên tài khoản...";
+  els.renameBtn.classList.remove("hidden");
+  els.accountName.textContent = acc?.alias || acc?.name || "Đang tải tên tài khoản...";
   els.accountCid.textContent = formatCid(customerId);
   els.autoDismiss.checked = Boolean(acc?.autoDismissRecommendations);
   els.dismissStatus.textContent = acc?.autoDismissRecommendations
@@ -599,7 +686,7 @@ async function loadAll() {
         state.settings = await api.renameAccount(state.selectedCid, kpi.customer_name);
         renderAccounts();
       }
-      els.accountName.textContent = kpi.customer_name;
+      els.accountName.textContent = currentAccount()?.alias || kpi.customer_name;
     }
     renderKpis();
     renderTable();
@@ -699,6 +786,22 @@ els.refreshBtn.addEventListener("click", () => {
   else showOverview();
 });
 els.backOverview.addEventListener("click", () => showOverview());
+els.renameBtn.addEventListener("click", () => {
+  const acc = currentAccount() || state.overviewRows.find((row) => row.customerId === state.selectedCid);
+  openAliasEditor(acc || { customerId: state.selectedCid, name: state.kpis?.customer_name || "" });
+});
+els.aliasForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  saveAlias(els.aliasInput.value);
+});
+els.aliasReset.addEventListener("click", () => saveAlias(""));
+els.aliasCancel.addEventListener("click", closeAliasEditor);
+els.aliasModal.addEventListener("click", (ev) => {
+  if (ev.target === els.aliasModal) closeAliasEditor();
+});
+els.aliasInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") closeAliasEditor();
+});
 els.settingsBtn.addEventListener("click", openSettings);
 els.settingsCancel.addEventListener("click", closeSettings);
 els.settingsModal.addEventListener("click", (ev) => {

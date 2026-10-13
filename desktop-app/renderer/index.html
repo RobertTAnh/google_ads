@@ -68,7 +68,10 @@
         <header class="topbar">
           <div class="topbar-title">
             <button id="back-overview" class="back-link hidden" type="button">← Tất cả tài khoản</button>
-            <h1 id="account-name">Tất cả tài khoản</h1>
+            <div class="title-row">
+              <h1 id="account-name">Tất cả tài khoản</h1>
+              <button id="rename-btn" class="edit-name hidden" type="button" title="Đổi tên hiển thị">✎</button>
+            </div>
             <p id="account-cid" class="muted">Chỉ số kỳ đã chọn và ngân sách còn lại</p>
           </div>
           <div class="topbar-actions">
@@ -160,6 +163,22 @@
           <button id="settings-save" type="button">Lưu</button>
         </div>
       </div>
+    </div>
+
+    <div id="alias-modal" class="modal hidden">
+      <form id="alias-form" class="modal-card">
+        <h2>Đổi tên hiển thị</h2>
+        <p id="alias-google" class="muted"></p>
+        <label>
+          Tên hiển thị trên app
+          <input id="alias-input" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+        <div class="modal-actions">
+          <button id="alias-reset" class="ghost" type="button">Dùng tên Google</button>
+          <button id="alias-cancel" class="ghost" type="button">Hủy</button>
+          <button id="alias-save" type="submit">Lưu</button>
+        </div>
+      </form>
     </div>
 
     <div id="toast" class="toast hidden"></div>

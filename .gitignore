@@ -6,6 +6,8 @@ __pycache__/
 desktop-app/node_modules/
 
 # Secrets / credentials
+.env
+debug.log
 google-ads.yaml
 client_secret_*.json
 leafy-pilot-*.json

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("adsDesk", {
   addAccount: (cid) => ipcRenderer.invoke("add-account", cid),
   removeAccount: (cid) => ipcRenderer.invoke("remove-account", cid),
   renameAccount: (customerId, name) => ipcRenderer.invoke("rename-account", { customerId, name }),
+  setAccountAlias: (row) => ipcRenderer.invoke("set-account-alias", row),
   upsertAccount: (row) => ipcRenderer.invoke("upsert-account", row),
   setAccountOption: (customerId, patch) => ipcRenderer.invoke("set-account-option", { customerId, ...patch }),
   listRecommendationAutoDismiss: (customerId) =>

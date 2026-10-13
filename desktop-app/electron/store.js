@@ -97,6 +97,7 @@ function normalizeState(raw) {
         .map((row) => ({
           customerId: String(row?.customerId || "").replace(/\D/g, ""),
           name: String(row?.name || ""),
+          alias: String(row?.alias || "").trim(),
           mccId: String(row?.mccId || "").replace(/\D/g, ""),
           addedAt: String(row?.addedAt || ""),
           autoDismissRecommendations: row?.autoDismissRecommendations === true,
